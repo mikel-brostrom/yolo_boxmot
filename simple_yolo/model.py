@@ -9,7 +9,7 @@ import torch.nn.functional as F
 
 
 class SimpleObjectDetector(pl.LightningModule):
-    def __init__(self, resnet_version='resnet18', num_classes=80, num_boxes=10, learning_rate=1e-3):
+    def __init__(self, resnet_version='resnet18', num_classes=80, num_boxes=10, learning_rate=1e-5):
         """
         Initialize the SimpleObjectDetector with different ResNet backbones.
         
@@ -39,14 +39,19 @@ class SimpleObjectDetector(pl.LightningModule):
             raise ValueError(f"Unsupported ResNet version: {resnet_version}. Choose 'resnet18', 'resnet34', or 'resnet50'.")
         
         # Add dropout for regularization
-        self.dropout = nn.Dropout(0.3)
-        
+        self.dropout = nn.Dropout(0.1)
         self.backbone = nn.Sequential(*list(self.backbone.children())[:-2])  # Remove fully connected layers
-
         self.classifier = nn.Conv2d(in_channels, num_classes * num_boxes, kernel_size=1)
         self.bbox_regressor = nn.Conv2d(in_channels, 4 * num_boxes, kernel_size=1)
         self.objectness = nn.Conv2d(in_channels, num_boxes, kernel_size=1)
-        self.learning_rate = learning_rate
+        
+        # nn.init.kaiming_normal_(self.classifier.weight, mode='fan_out', nonlinearity='relu')
+        # nn.init.constant_(self.classifier.bias, 0)
+        # nn.init.kaiming_normal_(self.bbox_regressor.weight, mode='fan_out', nonlinearity='relu')
+        # nn.init.constant_(self.bbox_regressor.bias, 0)
+        # nn.init.kaiming_normal_(self.objectness.weight, mode='fan_out', nonlinearity='relu')
+        # nn.init.constant_(self.objectness.bias, 0)
+        
 
     def forward(self, x):
         # (batch_size, 512, 7, 7) (for resnet18 or resnet34 with input size 224x224)
@@ -125,7 +130,7 @@ class SimpleObjectDetector(pl.LightningModule):
         )
 
         # Total loss
-        total_loss = total_ciou_loss + loss_cls + loss_obj
+        total_loss = (1.0 * total_ciou_loss) + (2.0 * loss_cls) + (1.0 * loss_obj)
         # Logging losses
         self.log('train_loss', total_loss, prog_bar=True)
 
@@ -151,4 +156,4 @@ class SimpleObjectDetector(pl.LightningModule):
     def configure_optimizers(self):
         optimizer = optim.Adam(self.parameters(), lr=self.learning_rate)
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=5)
-        return {"optimizer": optimizer, "lr_scheduler": scheduler, "monitor": "train_loss"}
+        return {"optimizer": optimizer, "lr_scheduler": scheduler, "monitor": "train_loss", "clip_grad": {"clip_val": 1.0}}

@@ -16,9 +16,9 @@ from albumentations import (
     Compose, Resize, HorizontalFlip, RandomBrightnessContrast, Normalize
 )
 from albumentations.pytorch import ToTensorV2
-from utils import download_coco128  # Utility for downloading dataset
-from model import SimpleObjectDetector
-from dataset import collate_fn, YOLODataset
+from simple_yolo.utils import download_coco128  # Utility for downloading dataset
+from simple_yolo.model import SimpleObjectDetector
+from simple_yolo.dataset import collate_fn, YOLODataset
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 
 
