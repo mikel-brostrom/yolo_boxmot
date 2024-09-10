@@ -118,16 +118,17 @@ def test_on_train_epoch_end():
 
 def test_no_valid_bounding_boxes():
     model = SimpleObjectDetector()
+    batch_size = 2
     
     # Dummy predictions
-    pred_cls = torch.randn(2, FEATURE_MAP_SIZE * model.num_boxes, model.num_classes)
-    pred_bbox = torch.rand(2, FEATURE_MAP_SIZE * model.num_boxes, 4)
-    pred_obj = torch.sigmoid(torch.randn(2, FEATURE_MAP_SIZE * model.num_boxes, 1))
+    pred_cls = torch.randn(batch_size, FEATURE_MAP_SIZE * model.num_boxes, model.num_classes)
+    pred_bbox = torch.rand(batch_size, FEATURE_MAP_SIZE * model.num_boxes, 4)
+    pred_obj = torch.sigmoid(torch.randn(batch_size, FEATURE_MAP_SIZE * model.num_boxes, 1))
     
     # Empty target bounding boxes
-    target_cls = torch.randint(0, model.num_classes, (2, FEATURE_MAP_SIZE * model.num_boxes))
-    target_bbox = torch.zeros(2, FEATURE_MAP_SIZE * model.num_boxes, 4)  # All zeros indicate no valid boxes
-    target_obj = torch.zeros(2, FEATURE_MAP_SIZE * model.num_boxes).float()  # Fix shape to match pred_obj
+    target_cls = torch.randint(0, model.num_classes, (batch_size, FEATURE_MAP_SIZE * model.num_boxes))
+    target_bbox = torch.zeros(batch_size, FEATURE_MAP_SIZE * model.num_boxes, 4)  # All zeros indicate no valid boxes
+    target_obj = torch.zeros(batch_size, FEATURE_MAP_SIZE * model.num_boxes).float()  # Fix shape to match pred_obj
 
     # Ensure it handles the situation gracefully
     ciou_loss, cls_loss, obj_loss = model.match_predictions_to_targets(pred_cls, pred_bbox, pred_obj, target_cls, target_bbox, target_obj)
