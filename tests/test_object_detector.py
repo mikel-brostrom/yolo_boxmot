@@ -36,29 +36,31 @@ def test_initialization():
 def test_forward_pass():
     model = SimpleObjectDetector(resnet_version='resnet18')
     model.eval()
+    batch_size = 2
     
     # Create a dummy input tensor of size (batch_size, channels, height, width)
-    x = torch.randn(2, 3, IMAGE_HEIGHT, IMAGE_WIDTH)
+    x = torch.randn(batch_size, 3, IMAGE_HEIGHT, IMAGE_WIDTH)
     
     # Perform forward pass
     cls_pred, bbox_pred, obj_pred = model(x)
     
     # Check output shapes
-    assert cls_pred.shape == (2, FEATURE_MAP_SIZE * model.num_boxes, model.num_classes), "Class predictions shape mismatch"
-    assert bbox_pred.shape == (2, FEATURE_MAP_SIZE * model.num_boxes, 4), "Bounding box predictions shape mismatch"
-    assert obj_pred.shape == (2, FEATURE_MAP_SIZE * model.num_boxes, 1), "Objectness predictions shape mismatch"
+    assert cls_pred.shape == (batch_size, FEATURE_MAP_SIZE * model.num_boxes, model.num_classes), "Class predictions shape mismatch"
+    assert bbox_pred.shape == (batch_size, FEATURE_MAP_SIZE * model.num_boxes, 4), "Bounding box predictions shape mismatch"
+    assert obj_pred.shape == (batch_size, FEATURE_MAP_SIZE * model.num_boxes, 1), "Objectness predictions shape mismatch"
 
 def test_loss_computation():
     model = SimpleObjectDetector(resnet_version='resnet18')
+    batch_size = 2
     
     # Dummy predictions and targets
-    pred_cls = torch.randn(2, FEATURE_MAP_SIZE * model.num_boxes, model.num_classes)
-    pred_bbox = torch.rand(2, FEATURE_MAP_SIZE * model.num_boxes, 4)  # between 0 and 1 for sigmoid
-    pred_obj = torch.sigmoid(torch.randn(2, FEATURE_MAP_SIZE * model.num_boxes, 1))
+    pred_cls = torch.randn(batch_size, FEATURE_MAP_SIZE * model.num_boxes, model.num_classes)
+    pred_bbox = torch.rand(batch_size, FEATURE_MAP_SIZE * model.num_boxes, 4)  # between 0 and 1 for sigmoid
+    pred_obj = torch.sigmoid(torch.randn(batch_size, FEATURE_MAP_SIZE * model.num_boxes, 1))
     
-    target_cls = torch.randint(0, model.num_classes, (2, FEATURE_MAP_SIZE * model.num_boxes))
-    target_bbox = torch.rand(2, FEATURE_MAP_SIZE * model.num_boxes, 4)
-    target_obj = torch.randint(0, 2, (2, FEATURE_MAP_SIZE * model.num_boxes)).float()  # Fix shape to match pred_obj
+    target_cls = torch.randint(0, model.num_classes, (batch_size, FEATURE_MAP_SIZE * model.num_boxes))
+    target_bbox = torch.rand(batch_size, FEATURE_MAP_SIZE * model.num_boxes, 4)
+    target_obj = torch.randint(0, 2, (batch_size, FEATURE_MAP_SIZE * model.num_boxes)).float()  # Fix shape to match pred_obj
 
     # Calculate loss
     ciou_loss, cls_loss, obj_loss = model.match_predictions_to_targets(pred_cls, pred_bbox, pred_obj, target_cls, target_bbox, target_obj)
@@ -70,12 +72,13 @@ def test_loss_computation():
 
 def test_training_step():
     model = SimpleObjectDetector(resnet_version='resnet18')
+    batch_size = 2
     
     # Dummy batch (images, target_cls, target_bbox, target_obj)
-    images = torch.randn(2, 3, IMAGE_HEIGHT, IMAGE_WIDTH)
-    target_cls = torch.randint(0, model.num_classes, (2, FEATURE_MAP_SIZE * model.num_boxes))
-    target_bbox = torch.rand(2, FEATURE_MAP_SIZE * model.num_boxes, 4)
-    target_obj = torch.randint(0, 2, (2, FEATURE_MAP_SIZE * model.num_boxes)).float()  # Fix shape to match pred_obj
+    images = torch.randn(batch_size, 3, IMAGE_HEIGHT, IMAGE_WIDTH)
+    target_cls = torch.randint(0, model.num_classes, (batch_size, FEATURE_MAP_SIZE * model.num_boxes))
+    target_bbox = torch.rand(batch_size, FEATURE_MAP_SIZE * model.num_boxes, 4)
+    target_obj = torch.randint(0, 2, (batch_size, FEATURE_MAP_SIZE * model.num_boxes)).float()  # Fix shape to match pred_obj
     
     batch = (images, target_cls, target_bbox, target_obj)
     
