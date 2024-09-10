@@ -12,6 +12,7 @@ from albumentations import (
 )
 from albumentations.pytorch import ToTensorV2
 
+
 def collate_fn(batch):
     """
     Custom collate function to handle variable number of bounding boxes in a batch.
@@ -51,6 +52,7 @@ def collate_fn(batch):
     obj_labels = torch.stack(obj_labels_list)
 
     return images, target_cls, boxes, obj_labels
+
 
 class YOLODataset(Dataset):
     """
@@ -195,7 +197,7 @@ def main():
     
     # Create dataset and dataloader
     dataset = YOLODataset(image_dir, label_dir)
-    dataloader = DataLoader(dataset, batch_size=4, collate_fn=collate_fn)
+    dataloader = DataLoader(dataset, batch_size=32, collate_fn=collate_fn)
 
     # Iterate through the dataloader
     for batch_idx, (images, target_cls, boxes, obj_labels) in enumerate(dataloader):
