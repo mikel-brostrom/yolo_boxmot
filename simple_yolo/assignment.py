@@ -30,6 +30,9 @@ def compute_ciou(box1, box2):
     # Compute IoU between box1 and box2
     iou = compute_iou(box1, box2)  # Assume this is implemented correctly
 
+    # Ensure IoU is in the range [0, 1]
+    iou = iou.clamp(min=0, max=1)
+
     # Calculate center coordinates for box1 and box2
     center1_x = (box1[:, :, 0] + box1[:, :, 2]) / 2
     center1_y = (box1[:, :, 1] + box1[:, :, 3]) / 2
@@ -46,19 +49,24 @@ def compute_ciou(box1, box2):
     c_ymax = torch.max(box1[:, :, None, 3], box2[:, None, :, 3])
     c2 = (c_xmax - c_xmin).clamp(min=1e-6) ** 2 + (c_ymax - c_ymin).clamp(min=1e-6) ** 2
 
+    # Ensure all widths and heights are positive
+    w1 = (box1[:, :, 2] - box1[:, :, 0]).clamp(min=1e-6)
+    h1 = (box1[:, :, 3] - box1[:, :, 1]).clamp(min=1e-6)
+    w2 = (box2[:, :, 2] - box2[:, :, 0]).clamp(min=1e-6)
+    h2 = (box2[:, :, 3] - box2[:, :, 1]).clamp(min=1e-6)
+
     # Aspect ratio consistency term (v)
-    w1 = box1[:, :, 2] - box1[:, :, 0]
-    h1 = box1[:, :, 3] - box1[:, :, 1]
-    w2 = box2[:, :, 2] - box2[:, :, 0]
-    h2 = box2[:, :, 3] - box2[:, :, 1]
-    v = (4 / (torch.pi ** 2)) * (torch.atan(w1[:, :, None] / h1[:, :, None].clamp(min=1e-6)) - 
-                                  torch.atan(w2[:, None, :] / h2[:, None, :].clamp(min=1e-6))) ** 2
+    v = (4 / (torch.pi ** 2)) * (torch.atan(w1[:, :, None] / h1[:, :, None]) - 
+                                  torch.atan(w2[:, None, :] / h2[:, None, :])) ** 2
 
     # Trade-off parameter (alpha) with improved numerical stability
     alpha = v / ((1 - iou + v).clamp(min=1e-6))
 
     # Complete IoU (CIoU) calculation
     ciou = iou - (rho2 / c2.clamp(min=1e-6)) - (alpha * v)
+
+    # Ensure CIoU is in the range [-1, 1]
+    ciou = ciou.clamp(min=-1.0, max=1.0)
 
     return ciou
 
