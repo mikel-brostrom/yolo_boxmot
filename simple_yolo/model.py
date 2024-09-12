@@ -27,7 +27,6 @@ class SimpleObjectDetector(pl.LightningModule):
             raise ValueError(f"Unsupported ResNet version: {resnet_version}. Choose 'resnet18', 'resnet34', or 'resnet50'.")
         
         # Add dropout for regularization
-        self.freeze_backbone()
         self.dropout = nn.Dropout(0.05)  # Increase dropout rate
         self.backbone = nn.Sequential(*list(self.backbone.children())[:-2])  # Remove fully connected layers
         self.bbox_regressor = nn.Conv2d(in_channels, 4 * num_boxes, kernel_size=1)
@@ -35,11 +34,7 @@ class SimpleObjectDetector(pl.LightningModule):
         # Initialize weights
         nn.init.normal_(self.bbox_regressor.weight, mean=0.0, std=0.01)
         nn.init.constant_(self.bbox_regressor.bias, 0)
-        
-    def freeze_backbone(self):
-        """Freeze the backbone to prevent it from being updated during training."""
-        for param in self.backbone.parameters():
-            param.requires_grad = False
+
 
     def forward(self, x):
         # Forward pass through the backbone
