@@ -3,7 +3,9 @@ from pathlib import Path
 from PIL import Image
 import numpy as np
 import cv2
+from typing import Tuple
 import torch
+from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 from torchvision.transforms import functional as F
 import pytorch_lightning as pl
@@ -11,6 +13,7 @@ from albumentations import (
     Compose, Resize, HorizontalFlip, RandomBrightnessContrast, Normalize
 )
 from albumentations.pytorch import ToTensorV2
+import argparse
 
 
 def collate_fn(batch):
@@ -58,7 +61,7 @@ class YOLODataset(Dataset):
     """
     Custom Dataset class for loading images and bounding box labels for YOLO object detection.
     """
-    def __init__(self, image_dir, label_dir, num_classes=80):
+    def __init__(self, image_dir, label_dir, visualize=False, num_classes=80):
         """
         Args:
             image_dir (str): Directory containing image files.
@@ -68,6 +71,7 @@ class YOLODataset(Dataset):
         self.image_dir = Path(image_dir)
         self.label_dir = Path(label_dir)
         self.num_classes = num_classes
+        self.viz = visualize
         self.images = list(self.image_dir.glob("*.jpg"))  # List of image paths
         
         # Define data augmentation and normalization transforms
@@ -83,7 +87,7 @@ class YOLODataset(Dataset):
         """Returns the total number of samples."""
         return len(self.images)
 
-    def __getitem__(self, index):
+    def __getitem__(self, index: int) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
         """
         Loads an image and its corresponding bounding boxes and labels, applies transformations, and returns them.
         
@@ -136,7 +140,8 @@ class YOLODataset(Dataset):
             labels = torch.empty((0,), dtype=torch.int64)
             
         # Visualize the image with bounding boxes (for debugging/verification)
-        self.visualize(img, boxes)
+        if self.viz:
+            self.visualize(img, boxes)
             
         # Normalize bounding boxes
         if boxes.size(0) > 0:  # Ensure there are boxes to normalize
@@ -191,12 +196,17 @@ def main():
     """
     Main function for testing the YOLODataset and DataLoader with custom collate function.
     """
+    
+    parser = argparse.ArgumentParser(description="YOLO Dataset Loader")
+    parser.add_argument('--viz', type=bool, default=False, help='Visualize images in batch')
+    args = parser.parse_args()
+    
     # Directories containing images and labels
     image_dir = 'coco128/coco128/images/train2017'  # Update with your actual image directory path
     label_dir = 'coco128/coco128/labels/train2017'  # Update with your actual label directory path
     
     # Create dataset and dataloader
-    dataset = YOLODataset(image_dir, label_dir)
+    dataset = YOLODataset(image_dir, label_dir, visualize=args.viz)
     dataloader = DataLoader(dataset, batch_size=32, collate_fn=collate_fn)
 
     # Iterate through the dataloader
