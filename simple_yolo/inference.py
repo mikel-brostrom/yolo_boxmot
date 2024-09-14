@@ -28,11 +28,13 @@ def detect_objects(model, image_path, conf_threshold=1, iou_threshold=0.8):
     # Perform inference
     with torch.no_grad():
         bbox_pred = model(input_tensor)  # Updated model output
+        
+    print(bbox_pred.shape)
 
     # Reshape predictions for processing
     bbox_pred = bbox_pred.view(-1, 4)  # Shape: (num_predictions, 4)
     
-
+    print(bbox_pred.shape)
     # Filter predictions by confidence threshold
     #filtered_bbox = bbox_pred
 
@@ -47,8 +49,8 @@ def detect_objects(model, image_path, conf_threshold=1, iou_threshold=0.8):
     # # Scale boxes back to original image dimensions
     # selected_boxes[:, [0, 2]] *= original_width
     # selected_boxes[:, [1, 3]] *= original_height
-    bbox_pred[:, [0, 2]] *= original_width
-    bbox_pred[:, [1, 3]] *= original_height
+    bbox_pred[:, [0, 2]] *= 512
+    bbox_pred[:, [1, 3]] *= 512
 
     #print(f"Scaled and Clamped Bounding Boxes (first 5): {selected_boxes[:5]} {selected_scores[:5]}")
 
@@ -74,10 +76,10 @@ def visualize_predictions(image, boxes):
         
         # Calculate text size for background rectangle
         (text_width, text_height), baseline = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-        cv2.rectangle(image, (box[0], box[1] - text_height - baseline), (box[0] + text_width, box[1]), color, thickness=cv2.FILLED)
+        #cv2.rectangle(image, (box[0], box[1] - text_height - baseline), (box[0] + text_width, box[1]), color, thickness=cv2.FILLED)
 
         # Put label text on image
-        cv2.putText(image, label_text, (box[0], box[1] - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        #cv2.putText(image, label_text, (box[0], box[1] - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
     # Show the image with OpenCV
     cv2.imshow('Object Detection', image)
@@ -86,7 +88,7 @@ def visualize_predictions(image, boxes):
 
 def main():
     # Paths
-    checkpoint_path = "/Users/mikel.brostrom/yolo_boxmot/lightning_logs/version_487/checkpoints/yolo-epoch=18-avg_train_loss=0.00.ckpt"  # Path to the trained weights
+    checkpoint_path = "/Users/mikel.brostrom/yolo_boxmot/lightning_logs/version_510/checkpoints/yolo-epoch=09-avg_train_loss=0.00.ckpt"  # Path to the trained weights
     image_path = "coco128/coco128/images/train2017/000000000025.jpg"  # Example image from COCO128
     
     # Load the trained model
