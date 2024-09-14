@@ -8,7 +8,7 @@ import torchvision.transforms as T
 from pathlib import Path
 from simple_yolo.model import SimpleObjectDetector
 
-def load_model(checkpoint_path, num_boxes=100):
+def load_model(checkpoint_path, num_boxes=10):
     model = SimpleObjectDetector(num_boxes=num_boxes)
     model.load_state_dict(torch.load(checkpoint_path)["state_dict"])
     model.eval()  # Set model to evaluation mode
@@ -27,37 +27,35 @@ def detect_objects(model, image_path, conf_threshold=1, iou_threshold=0.8):
 
     # Perform inference
     with torch.no_grad():
-        bbox_pred, conf_pred = model(input_tensor)  # Updated model output
+        bbox_pred = model(input_tensor)  # Updated model output
 
     # Reshape predictions for processing
     bbox_pred = bbox_pred.view(-1, 4)  # Shape: (num_predictions, 4)
-    conf_pred = conf_pred.view(-1)  # Shape: (num_predictions,)
     
 
     # Filter predictions by confidence threshold
-    conf_mask = conf_pred >= conf_threshold
-    filtered_bbox = bbox_pred[conf_mask]
-    filtered_scores = conf_pred[conf_mask]
+    #filtered_bbox = bbox_pred
 
-    print(f"Filtered {conf_mask.sum()} predictions above confidence threshold {conf_threshold}")
 
     # Apply Non-Maximum Suppression (NMS)
-    keep_indices = torchvision.ops.nms(filtered_bbox, filtered_scores, iou_threshold)
-    selected_boxes = filtered_bbox[keep_indices]
-    selected_scores = filtered_scores[keep_indices]
+    # keep_indices = torchvision.ops.nms(filtered_bbox, filtered_scores, iou_threshold)
+    # selected_boxes = filtered_bbox[keep_indices]
+    # selected_scores = filtered_scores[keep_indices]
 
-    print(f"Detected {selected_boxes.shape[0]} objects after NMS")
+    # print(f"Detected {selected_boxes.shape[0]} objects after NMS")
 
-    # Scale boxes back to original image dimensions
-    selected_boxes[:, [0, 2]] *= original_width
-    selected_boxes[:, [1, 3]] *= original_height
+    # # Scale boxes back to original image dimensions
+    # selected_boxes[:, [0, 2]] *= original_width
+    # selected_boxes[:, [1, 3]] *= original_height
+    bbox_pred[:, [0, 2]] *= original_width
+    bbox_pred[:, [1, 3]] *= original_height
 
-    print(f"Scaled and Clamped Bounding Boxes (first 5): {selected_boxes[:5]} {selected_scores[:5]}")
+    #print(f"Scaled and Clamped Bounding Boxes (first 5): {selected_boxes[:5]} {selected_scores[:5]}")
 
-    return selected_boxes, selected_scores, img
+    return bbox_pred, img
 
 # Visualization function
-def visualize_predictions(image, boxes, scores):
+def visualize_predictions(image, boxes):
     # Convert PIL image to OpenCV format (numpy array)
     image = np.array(image)
     image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)  # Convert RGB (PIL) to BGR (OpenCV)
@@ -65,7 +63,7 @@ def visualize_predictions(image, boxes, scores):
     # Draw boxes and labels
     for i in range(boxes.shape[0]):
         box = boxes[i].cpu().numpy().astype(int)  # Convert to numpy and ensure integer coordinates
-        score = scores[i].item()
+        score = 0
         color = (0, 0, 255)  # Red color in BGR format
 
         # Draw the bounding box
@@ -88,17 +86,17 @@ def visualize_predictions(image, boxes, scores):
 
 def main():
     # Paths
-    checkpoint_path = "lightning_logs/version_366/checkpoints/yolo-epoch=17-avg_train_loss=0.00.ckpt"  # Path to the trained weights
+    checkpoint_path = "/Users/mikel.brostrom/yolo_boxmot/lightning_logs/version_487/checkpoints/yolo-epoch=18-avg_train_loss=0.00.ckpt"  # Path to the trained weights
     image_path = "coco128/coco128/images/train2017/000000000025.jpg"  # Example image from COCO128
     
     # Load the trained model
     model = load_model(checkpoint_path)
     
     # Perform object detection
-    boxes, scores, img = detect_objects(model, image_path)
+    boxes, img = detect_objects(model, image_path)
     
     # Visualize results
-    visualize_predictions(img.resize((512, 512)), boxes, scores)
+    visualize_predictions(img.resize((512, 512)), boxes)
 
 if __name__ == "__main__":
     main()

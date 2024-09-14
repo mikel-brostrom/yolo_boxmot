@@ -29,7 +29,7 @@ def main():
 
     model = SimpleObjectDetector(num_classes=80)
     dataset = YOLODataset(image_dir, label_dir)
-    train_loader = DataLoader(dataset, batch_size=8, shuffle=True, collate_fn=collate_fn)
+    train_loader = DataLoader(dataset, batch_size=16, shuffle=True, collate_fn=collate_fn)
 
     checkpoint_callback = ModelCheckpoint(
         monitor='train_bbox_loss',
@@ -37,7 +37,7 @@ def main():
         save_top_k=3,
         mode='min',
     )
-    early_stopping_callback = EarlyStopping(monitor='train_bbox_loss', patience=10)
+    early_stopping_callback = EarlyStopping(monitor='train_bbox_loss', patience=30)
 
     accelerator = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
     trainer = pl.Trainer(
