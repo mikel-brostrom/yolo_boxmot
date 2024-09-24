@@ -30,6 +30,12 @@ def detect_objects(model, image_path, conf_threshold=0.5, obj_threshold=0.5, iou
         bbox_pred, cls_pred, obj_pred = model(input_tensor)  # Updated model output to get bbox, class, and objectness predictions
 
     print(f"bbox_pred.shape: {bbox_pred.shape}, cls_pred.shape: {cls_pred.shape}, obj_pred.shape: {obj_pred.shape}")
+    
+    # Decode predicted boxes from feature map space to image space
+    feature_map_size = (bbox_pred.shape[1], bbox_pred.shape[2])  # Feature map size from predictions
+    decoded_anchors = model.decode_anchors_to_image_space(
+        model.anchors, feature_map_size, (512, 512)
+    )
 
     # Reshape predictions for processing
     bbox_pred = bbox_pred.view(-1, 4)  # Shape: (num_predictions, 4)
@@ -42,7 +48,7 @@ def detect_objects(model, image_path, conf_threshold=0.5, obj_threshold=0.5, iou
 
     # Apply a confidence threshold and objectness threshold
     keep = (combined_scores > conf_threshold) & (obj_pred > obj_threshold)  # Filter based on both objectness and confidence
-    filtered_boxes = bbox_pred[keep]
+    filtered_boxes = decoded_anchors[keep]
     filtered_scores = combined_scores[keep]
     filtered_classes = class_indices[keep]
 
@@ -93,7 +99,7 @@ def visualize_predictions(image, boxes, scores, classes):
 
 def main():
     # Paths
-    checkpoint_path = "/Users/mikel.brostrom/yolo_boxmot/lightning_logs/version_30/checkpoints/yolo-epoch=03-avg_train_loss=0.00.ckpt"  # Path to the trained weights
+    checkpoint_path = "/Users/mikel.brostrom/yolo_boxmot/lightning_logs/version_30/checkpoints/yolo-epoch=11-avg_train_loss=0.00.ckpt"  # Path to the trained weights
     image_path = "coco128/coco128/images/train2017/000000000009.jpg"  # Example image from COCO128
     
     # Load the trained model

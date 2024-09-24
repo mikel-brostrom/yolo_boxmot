@@ -9,7 +9,7 @@ from scipy.optimize import linear_sum_assignment
 import torch.nn.functional as F
 
 class SimpleObjectDetector(pl.LightningModule):
-    def __init__(self, resnet_version='resnet18', num_boxes=1, num_classes=80, learning_rate=1e-3):
+    def __init__(self, resnet_version='resnet18', num_boxes=1, num_classes=80, learning_rate=1e-5):
         super(SimpleObjectDetector, self).__init__()
         self.num_boxes = num_boxes
         self.num_classes = num_classes  # Define the number of classes
@@ -27,13 +27,13 @@ class SimpleObjectDetector(pl.LightningModule):
         in_channels = self._get_in_channels(resnet_version)
 
         # Define dropout and advanced bbox regressor layers
-        self.dropout = nn.Dropout(0.5)
+        self.dropout = nn.Dropout(0.1)
         self.bbox_head = self._build_bbox_head(in_channels)
 
         # Define classification head
-        self.cls_head = self._build_cls_head(in_channels)
+        #self.cls_head = self._build_cls_head(in_channels)
         
-        self.obj_head = self._build_obj_head(in_channels)
+        #self.obj_head = self._build_obj_head(in_channels)
 
         # Initialize weights
         self._initialize_weights()
@@ -96,11 +96,12 @@ class SimpleObjectDetector(pl.LightningModule):
 
     def _initialize_weights(self):
         """Initialize the weights of the heads."""
-        for head in [self.bbox_head, self.cls_head, self.obj_head]:
+        for head in [self.bbox_head]:
             for m in head:
                 if isinstance(m, nn.Conv2d):
                     nn.init.normal_(m.weight, mean=0.0, std=0.01)
                     nn.init.constant_(m.bias, 0)
+                    
 
     def forward(self, x):
         """Forward pass through the network."""
@@ -112,18 +113,18 @@ class SimpleObjectDetector(pl.LightningModule):
         # Predict bounding boxes
         bbox_pred = self.bbox_head(features).permute(0, 2, 3, 1).contiguous().view(x.size(0), -1, 4)
 
-        # Predict classification scores
-        cls_pred = self.cls_head(features).permute(0, 2, 3, 1).contiguous().view(x.size(0), -1, self.num_classes)
+        # # Predict classification scores
+        # cls_pred = self.cls_head(features).permute(0, 2, 3, 1).contiguous().view(x.size(0), -1, self.num_classes)
         
-        # Predict objectness scores
-        obj_pred = self.obj_head(features).permute(0, 2, 3, 1).contiguous().view(x.size(0), -1, 1)
+        # # Predict objectness scores
+        # obj_pred = self.obj_head(features).permute(0, 2, 3, 1).contiguous().view(x.size(0), -1, 1)
 
         # Apply sigmoid to dx, dy and exponential to dw, dh for stability in bbox predictions
-        obj_pred = torch.sigmoid(obj_pred)
+        #obj_pred = torch.sigmoid(obj_pred)
         bbox_pred[..., :2] = torch.sigmoid(bbox_pred[..., :2])
         bbox_pred[..., 2:] = torch.exp(bbox_pred[..., 2:])
         
-        return bbox_pred, cls_pred, obj_pred
+        return bbox_pred#, cls_pred, obj_pred
 
 
     def decode_anchors_to_image_space(self, anchors, feature_map_size, img_size):
@@ -158,9 +159,9 @@ class SimpleObjectDetector(pl.LightningModule):
 
         return decoded_anchors
 
-    @staticmethod
-    def match_anchors_to_ground_truth(anchors, ground_truth_boxes, iou_threshold_high=0.5, iou_threshold_low=0.3):
 
+    @staticmethod
+    def match_anchors_to_ground_truth(anchors, ground_truth_boxes, iou_threshold=0.5):
         # Ensure anchors and ground_truth_boxes are 3D for IoU computation
         if anchors.dim() == 2:
             anchors = anchors.unsqueeze(0)
@@ -174,138 +175,84 @@ class SimpleObjectDetector(pl.LightningModule):
         iou_matrix = compute_iou(anchors, ground_truth_boxes)  # Shape: (batch_size, num_anchors, num_gt_boxes)
 
         # Precompute max IoU and best-matching ground truth for each anchor
-        max_iou_per_anchor, best_gt_per_anchor = torch.max(iou_matrix, dim=2)  # Shape: (batch_size, num_anchors)
+        max_iou_per_anchor, best_gt_per_anchor = torch.max(iou_matrix, dim=2)  # Shape: (batch_size, nr predictions)
+
+        # Find positive anchors based on IoU threshold high
+        positive_anchors_mask = (max_iou_per_anchor >= iou_threshold)  # Shape: (batch_size, nr predictions)
+
+        # Find negative anchors based on IoU threshold low
+        negative_anchors_mask = (max_iou_per_anchor < iou_threshold)
+
+        # Prepare the assignment of anchors to ground truths
+        anchor_to_gt_assignment = torch.where(positive_anchors_mask, best_gt_per_anchor, -1 * torch.ones_like(best_gt_per_anchor))
         
-        positive_anchors = [set() for _ in range(len(anchors))]
-        negative_anchors = [set(range(len(anchors[0]))) for _ in range(len(anchors))]
-        anchor_to_gt_assignment = [{} for _ in range(len(anchors))]
-
-        # Assign each ground truth to the best-matching anchor if IoU is above high threshold
-        for batch_idx in range(len(anchors)):
-            # For each ground truth, find the best matching anchor
-            max_iou_per_gt, best_anchor_per_gt = torch.max(iou_matrix[batch_idx], dim=0)
-            
-            for gt_idx in range(len(ground_truth_boxes[batch_idx])):
-                best_anchor = best_anchor_per_gt[gt_idx].item()
-                if max_iou_per_gt[gt_idx].item() >= iou_threshold_high:
-                    positive_anchors[batch_idx].add(best_anchor)
-                    anchor_to_gt_assignment[batch_idx][best_anchor] = gt_idx
-
-            # Assign additional positive anchors and determine negatives
-            for anchor_idx in range(len(anchors[batch_idx])):
-                max_iou = max_iou_per_anchor[batch_idx, anchor_idx].item()
-                gt_idx = best_gt_per_anchor[batch_idx, anchor_idx].item()
-
-                # Assign positive anchor if IoU exceeds the high threshold
-                if max_iou >= iou_threshold_high:
-                    positive_anchors[batch_idx].add(anchor_idx)
-                    anchor_to_gt_assignment[batch_idx][anchor_idx] = gt_idx
-
-                # Assign negative anchor if IoU is below the low threshold
-                elif max_iou < iou_threshold_low:
-                    negative_anchors[batch_idx].add(anchor_idx)
-
-            # Remove positive anchors from negative set
-            negative_anchors[batch_idx] -= positive_anchors[batch_idx]
-
-        return positive_anchors, negative_anchors, anchor_to_gt_assignment
+        # Return masks for positive, neutral, and negative anchors
+        return positive_anchors_mask, negative_anchors_mask, anchor_to_gt_assignment  # Shape: (batch_size, nr predictions)
 
 
     def training_step(self, batch, batch_idx):
         images, targets_cls, targets_bbox, targets_obj = batch
-        
-        # print(targets_cls[0][0])
 
         # Forward pass through the model to get predictions
-        pred_bbox, pred_cls, pred_obj = self(images)
+        pred_bbox = self(images)
+
+        # Assume pred_bbox is of shape (batch_size, num_anchors, 4) and represents predicted bounding boxes.
+        # pred_cls is of shape (batch_size, num_anchors, num_classes) for class predictions.
+        # pred_obj is of shape (batch_size, num_anchors) representing objectness scores.
         
-        # print(pred_cls[0][0])
+        batch_size = images.size(0)
+        num_anchors = pred_bbox.size(1)
 
-        # Match anchors (predicted boxes) to ground truth boxes
-        positive_anchors, negative_anchors, anchor_to_gt_assignment = self.match_anchors_to_ground_truth(pred_bbox, targets_bbox)
-
-        # Create masks for positive and negative anchors
-        positive_anchor_mask = torch.zeros(pred_bbox.shape[:2], dtype=torch.bool, device=pred_bbox.device)
-        # negative_anchor_mask = torch.zeros(pred_bbox.shape[:2], dtype=torch.bool, device=pred_bbox.device)
-
-        # Populate the masks for positive and negative anchors
-        for b_idx in range(len(positive_anchors)):
-            for anchor_idx in positive_anchors[b_idx]:
-                positive_anchor_mask[b_idx, anchor_idx] = True
-            # for anchor_idx in negative_anchors[b_idx]:
-            #     negative_anchor_mask[b_idx, anchor_idx] = True
-
-        # Filter predictions using the positive anchor mask
-        positive_pred_bbox = pred_bbox[positive_anchor_mask]
-        positive_pred_cls = pred_cls[positive_anchor_mask]
-        positive_pred_obj = pred_obj[positive_anchor_mask]
-        
-        # print(positive_pred_bbox.shape)
-        # print(positive_pred_cls.shape)
-        # print(positive_pred_obj.shape)
-        
-        # Initialize the ground truth bbox tensor with the correct size
-        num_pos_anchors = positive_anchor_mask.sum().item()
-        positive_gt_bbox = torch.zeros((num_pos_anchors, 4), dtype=targets_bbox.dtype, device=targets_bbox.device)
-        positive_gt_cls = torch.zeros((num_pos_anchors, pred_cls.shape[-1]), dtype=pred_cls.dtype, device=pred_cls.device)
-        positive_gt_obj = torch.zeros((num_pos_anchors, 1), dtype=pred_cls.dtype, device=pred_cls.device)
-
-        pos_anchor_counter = 0  # Counter to track the index in positive_gt_bbox
-        for b_idx, anchor_gt_map in enumerate(anchor_to_gt_assignment):
-            for anchor_idx, gt_idx in anchor_gt_map.items():
-                # Assign the ground truth bbox to the positive_gt_bbox
-                positive_gt_bbox[pos_anchor_counter] = targets_bbox[b_idx][gt_idx]
-                positive_gt_cls[pos_anchor_counter] = targets_cls[b_idx, gt_idx]
-                positive_gt_obj[pos_anchor_counter] = targets_obj[b_idx, gt_idx]
-                pos_anchor_counter += 1
-                          
-        # print(positive_gt_bbox.shape)
-        # print(positive_gt_cls.shape)
-        # print(positive_gt_obj.shape)
-        
-        # Convert one-hot ground truth to class indices
-        positive_gt_cls = torch.argmax(positive_gt_cls, dim=-1).long()
-
-        # Compute classification loss
-        cls_loss = self.cls_loss_function(positive_pred_cls, positive_gt_cls)
-
-        # Bounding Box Loss: Compute for positive anchors
-        bbox_loss = F.smooth_l1_loss(positive_pred_bbox, positive_gt_bbox, reduction='mean')  # L1 Loss for bbox regression
-
-        # Objectness Loss: Compute for both positive and negative anchors
-        obj_loss = self.obj_loss_function(positive_pred_obj, positive_gt_obj)
-
-        # Combine losses (you can adjust the weights as needed)
-        cls_loss_weight = 0.2  # Scale down classification loss
-        reg_loss_weight = 100  # Scale up regression loss
-        obj_loss_weight = 1.5  # Slightly increase objectness loss
-
-        total_loss = (
-            cls_loss_weight * cls_loss +
-            reg_loss_weight * bbox_loss +
-            obj_loss_weight * obj_loss
+        # Compute the ground truth matching for anchors
+        positive_mask, negative_mask, anchor_to_gt_assignment = self.match_anchors_to_ground_truth(
+            pred_bbox, targets_bbox, iou_threshold=0.5
         )
 
+        # Initialize losses
+        loss_bbox = 0
+        loss_cls = 0
+        loss_obj = 0
+
+        for b in range(batch_size):
+            # Extract the relevant ground truth for the current batch item
+            gt_cls = targets_cls[b]  # Shape: (num_gt_boxes, num_classes)
+            gt_bbox = targets_bbox[b]  # Shape: (num_gt_boxes, 4)
+            gt_obj = targets_obj[b]  # Shape: (num_gt_boxes)
+
+            # Retrieve the matched ground truth boxes for positive anchors
+            pos_anchors = positive_mask[b]
+            matched_gt_indices = anchor_to_gt_assignment[b][pos_anchors]
+
+            if matched_gt_indices.numel() > 0:
+                # Bounding Box Loss (e.g., Smooth L1 or GIoU Loss)
+                matched_pred_bbox = pred_bbox[b][pos_anchors]
+                matched_gt_bbox = gt_bbox[matched_gt_indices]
+                
+                loss_bbox += F.smooth_l1_loss(matched_pred_bbox, matched_gt_bbox)
+
+        total_loss = loss_bbox
+        
         # Log the losses
-        self.log('cls_loss', cls_loss_weight * cls_loss, prog_bar=True, on_step=True, on_epoch=True)
-        self.log('bbox_loss', reg_loss_weight * bbox_loss, prog_bar=True, on_step=True, on_epoch=True)
-        self.log('obj_loss', obj_loss_weight * obj_loss, prog_bar=True, on_step=True, on_epoch=True)
+        # self.log('cls_loss', cls_loss_weight * loss_cls, prog_bar=True, on_step=True, on_epoch=True)
+        # self.log('bbox_loss', reg_loss_weight * loss_bbox, prog_bar=True, on_step=True, on_epoch=True)
+        # self.log('obj_loss', obj_loss_weight * loss_obj, prog_bar=True, on_step=True, on_epoch=True)
         self.log('total_loss', total_loss, prog_bar=True, on_step=True, on_epoch=True)
 
+        # Log or return the loss
         return total_loss
 
     def on_train_epoch_end(self):
         # Access the average metrics for the epoch
         avg_total_loss = self.trainer.callback_metrics['total_loss'].item()
-        avg_bbox_loss = self.trainer.callback_metrics['bbox_loss'].item()
-        avg_cls_loss = self.trainer.callback_metrics['cls_loss'].item()
-        avg_obj_loss = self.trainer.callback_metrics['obj_loss'].item()
+        # avg_bbox_loss = self.trainer.callback_metrics['bbox_loss'].item()
+        # avg_cls_loss = self.trainer.callback_metrics['cls_loss'].item()
+        # avg_obj_loss = self.trainer.callback_metrics['obj_loss'].item()
 
         # Print the metrics
         print(f"Epoch {self.current_epoch} - Avg Total Loss: {avg_total_loss:.4f}")
-        print(f"Epoch {self.current_epoch} - Avg Reg Loss: {avg_bbox_loss:.4f}")
-        print(f"Epoch {self.current_epoch} - Avg Cls Loss: {avg_cls_loss:.4f}")
-        print(f"Epoch {self.current_epoch} - Avg Obj Loss: {avg_obj_loss:.4f}")
+        # print(f"Epoch {self.current_epoch} - Avg Reg Loss: {avg_bbox_loss:.4f}")
+        # print(f"Epoch {self.current_epoch} - Avg Cls Loss: {avg_cls_loss:.4f}")
+        # print(f"Epoch {self.current_epoch} - Avg Obj Loss: {avg_obj_loss:.4f}")
 
 
     def configure_optimizers(self):
