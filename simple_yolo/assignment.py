@@ -1,28 +1,47 @@
 import torch
 
 def compute_iou(box1, box2):
-    """Calculate IoU of two 2D bounding boxes in a batch-wise manner."""
-    # Compute intersection coordinates
+    """
+    Compute the Intersection over Union (IoU) between two sets of boxes.
+    
+    Args:
+        box1 (torch.Tensor): Bounding boxes with shape (batch_size, num_boxes1, 4) or (num_boxes1, 4).
+        box2 (torch.Tensor): Bounding boxes with shape (batch_size, num_boxes2, 4) or (num_boxes2, 4).
+        
+    Returns:
+        iou (torch.Tensor): IoU values with shape (batch_size, num_boxes1, num_boxes2) or (num_boxes1, num_boxes2).
+    """
+    # Ensure that both box1 and box2 have 3 dimensions: (batch_size, num_boxes, 4)
+    if box1.dim() == 2:
+        box1 = box1.unsqueeze(0)
+    if box2.dim() == 2:
+        box2 = box2.unsqueeze(0)
+
+    # Ensure both tensors are on the same device
+    device = box1.device
+    box2 = box2.to(device)
+
+    # Calculate the intersection coordinates
     inter_xmin = torch.max(box1[:, :, None, 0], box2[:, None, :, 0])
     inter_ymin = torch.max(box1[:, :, None, 1], box2[:, None, :, 1])
     inter_xmax = torch.min(box1[:, :, None, 2], box2[:, None, :, 2])
     inter_ymax = torch.min(box1[:, :, None, 3], box2[:, None, :, 3])
 
-    # Compute intersection area
-    inter_width = torch.clamp(inter_xmax - inter_xmin, min=0)
-    inter_height = torch.clamp(inter_ymax - inter_ymin, min=0)
-    intersection = inter_width * inter_height
+    # Calculate intersection area
+    inter_width = (inter_xmax - inter_xmin).clamp(min=0)
+    inter_height = (inter_ymax - inter_ymin).clamp(min=0)
+    inter_area = inter_width * inter_height
 
-    # Compute areas of boxes
-    box1_area = (box1[:, :, 2] - box1[:, :, 0]) * (box1[:, :, 3] - box1[:, :, 1])
-    box2_area = (box2[:, :, 2] - box2[:, :, 0]) * (box2[:, :, 3] - box2[:, :, 1])
+    # Calculate union area
+    area1 = (box1[:, :, 2] - box1[:, :, 0]) * (box1[:, :, 3] - box1[:, :, 1])
+    area2 = (box2[:, :, 2] - box2[:, :, 0]) * (box2[:, :, 3] - box2[:, :, 1])
+    union_area = area1[:, :, None] + area2[:, None, :] - inter_area
 
-    # Compute union area
-    union = box1_area[:, :, None] + box2_area[:, None, :] - intersection
-
-    # IoU
-    iou = intersection / torch.clamp(union, min=1e-6)
+    # Compute IoU
+    iou = inter_area / union_area
     return iou
+
+
 
 
 def compute_ciou(box1, box2):
