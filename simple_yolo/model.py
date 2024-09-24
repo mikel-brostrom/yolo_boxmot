@@ -9,12 +9,11 @@ from scipy.optimize import linear_sum_assignment
 import torch.nn.functional as F
 
 class SimpleObjectDetector(pl.LightningModule):
-    def __init__(self, resnet_version='resnet18', num_boxes=1, num_classes=80, learning_rate=1e-3, ciou_threshold=0.5):
+    def __init__(self, resnet_version='resnet18', num_boxes=1, num_classes=80, learning_rate=1e-3):
         super(SimpleObjectDetector, self).__init__()
         self.num_boxes = num_boxes
         self.num_classes = num_classes  # Define the number of classes
         self.learning_rate = learning_rate
-        self.ciou_threshold = ciou_threshold
 
         # Define anchor box sizes for three scales
         self.anchors = torch.tensor([
@@ -97,7 +96,7 @@ class SimpleObjectDetector(pl.LightningModule):
 
     def _initialize_weights(self):
         """Initialize the weights of the heads."""
-        for head in [self.bbox_head, self.cls_head]:
+        for head in [self.bbox_head, self.cls_head, self.obj_head]:
             for m in head:
                 if isinstance(m, nn.Conv2d):
                     nn.init.normal_(m.weight, mean=0.0, std=0.01)
@@ -107,6 +106,8 @@ class SimpleObjectDetector(pl.LightningModule):
         """Forward pass through the network."""
         features = self.backbone(x)
         features = self.dropout(features)
+        
+        # print(features.shape)
 
         # Predict bounding boxes
         bbox_pred = self.bbox_head(features).permute(0, 2, 3, 1).contiguous().view(x.size(0), -1, 4)
@@ -114,12 +115,14 @@ class SimpleObjectDetector(pl.LightningModule):
         # Predict classification scores
         cls_pred = self.cls_head(features).permute(0, 2, 3, 1).contiguous().view(x.size(0), -1, self.num_classes)
         
+        # Predict objectness scores
         obj_pred = self.obj_head(features).permute(0, 2, 3, 1).contiguous().view(x.size(0), -1, 1)
 
         # Apply sigmoid to dx, dy and exponential to dw, dh for stability in bbox predictions
+        obj_pred = torch.sigmoid(obj_pred)
         bbox_pred[..., :2] = torch.sigmoid(bbox_pred[..., :2])
         bbox_pred[..., 2:] = torch.exp(bbox_pred[..., 2:])
-
+        
         return bbox_pred, cls_pred, obj_pred
 
 
@@ -128,15 +131,13 @@ class SimpleObjectDetector(pl.LightningModule):
         Decode anchors from feature map space to image space.
         """
         num_anchors = anchors.shape[0]
-        feature_map_height, feature_map_width = feature_map_size
+        
         img_height, img_width = img_size
-
-        # Calculate stride (size of each cell in the original image)
-        stride_h = img_height / feature_map_height
-        stride_w = img_width / feature_map_width
+        stride_h, stride_w = 32, 32
+        feature_map_height, feature_map_width = img_height // stride_h, img_width // stride_w
 
         # Prepare tensors to hold the decoded anchors
-        decoded_anchors = torch.zeros((num_anchors * feature_map_height * feature_map_width, 4), device=anchors.device)
+        decoded_anchors = torch.zeros((2304, 4), device=anchors.device)
 
         # Iterate over the feature map grid
         idx = 0
@@ -212,32 +213,36 @@ class SimpleObjectDetector(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         images, targets_cls, targets_bbox, targets_obj = batch
+        
+        # print(targets_cls[0][0])
 
         # Forward pass through the model to get predictions
         pred_bbox, pred_cls, pred_obj = self(images)
+        
+        # print(pred_cls[0][0])
 
         # Match anchors (predicted boxes) to ground truth boxes
         positive_anchors, negative_anchors, anchor_to_gt_assignment = self.match_anchors_to_ground_truth(pred_bbox, targets_bbox)
 
         # Create masks for positive and negative anchors
         positive_anchor_mask = torch.zeros(pred_bbox.shape[:2], dtype=torch.bool, device=pred_bbox.device)
-        negative_anchor_mask = torch.zeros(pred_bbox.shape[:2], dtype=torch.bool, device=pred_bbox.device)
+        # negative_anchor_mask = torch.zeros(pred_bbox.shape[:2], dtype=torch.bool, device=pred_bbox.device)
 
         # Populate the masks for positive and negative anchors
         for b_idx in range(len(positive_anchors)):
             for anchor_idx in positive_anchors[b_idx]:
                 positive_anchor_mask[b_idx, anchor_idx] = True
-            for anchor_idx in negative_anchors[b_idx]:
-                negative_anchor_mask[b_idx, anchor_idx] = True
+            # for anchor_idx in negative_anchors[b_idx]:
+            #     negative_anchor_mask[b_idx, anchor_idx] = True
 
         # Filter predictions using the positive anchor mask
         positive_pred_bbox = pred_bbox[positive_anchor_mask]
         positive_pred_cls = pred_cls[positive_anchor_mask]
         positive_pred_obj = pred_obj[positive_anchor_mask]
         
-        print(positive_pred_bbox.shape)
-        print(positive_pred_cls.shape)
-        print(positive_pred_obj.shape)
+        # print(positive_pred_bbox.shape)
+        # print(positive_pred_cls.shape)
+        # print(positive_pred_obj.shape)
         
         # Initialize the ground truth bbox tensor with the correct size
         num_pos_anchors = positive_anchor_mask.sum().item()
@@ -253,11 +258,10 @@ class SimpleObjectDetector(pl.LightningModule):
                 positive_gt_cls[pos_anchor_counter] = targets_cls[b_idx, gt_idx]
                 positive_gt_obj[pos_anchor_counter] = targets_obj[b_idx, gt_idx]
                 pos_anchor_counter += 1
-                
-                
-        print(positive_gt_bbox.shape)
-        print(positive_gt_cls.shape)
-        print(positive_gt_obj.shape)
+                          
+        # print(positive_gt_bbox.shape)
+        # print(positive_gt_cls.shape)
+        # print(positive_gt_obj.shape)
         
         # Convert one-hot ground truth to class indices
         positive_gt_cls = torch.argmax(positive_gt_cls, dim=-1).long()
@@ -272,12 +276,20 @@ class SimpleObjectDetector(pl.LightningModule):
         obj_loss = self.obj_loss_function(positive_pred_obj, positive_gt_obj)
 
         # Combine losses (you can adjust the weights as needed)
-        total_loss = cls_loss + bbox_loss + obj_loss
+        cls_loss_weight = 0.2  # Scale down classification loss
+        reg_loss_weight = 100  # Scale up regression loss
+        obj_loss_weight = 1.5  # Slightly increase objectness loss
+
+        total_loss = (
+            cls_loss_weight * cls_loss +
+            reg_loss_weight * bbox_loss +
+            obj_loss_weight * obj_loss
+        )
 
         # Log the losses
-        self.log('cls_loss', cls_loss, prog_bar=True, on_step=True, on_epoch=True)
-        self.log('bbox_loss', bbox_loss, prog_bar=True, on_step=True, on_epoch=True)
-        self.log('obj_loss', obj_loss, prog_bar=True, on_step=True, on_epoch=True)
+        self.log('cls_loss', cls_loss_weight * cls_loss, prog_bar=True, on_step=True, on_epoch=True)
+        self.log('bbox_loss', reg_loss_weight * bbox_loss, prog_bar=True, on_step=True, on_epoch=True)
+        self.log('obj_loss', obj_loss_weight * obj_loss, prog_bar=True, on_step=True, on_epoch=True)
         self.log('total_loss', total_loss, prog_bar=True, on_step=True, on_epoch=True)
 
         return total_loss
