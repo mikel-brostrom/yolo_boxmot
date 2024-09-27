@@ -8,39 +8,38 @@ from simple_yolo.assignment import compute_ciou, compute_iou
 from scipy.optimize import linear_sum_assignment
 import torch.nn.functional as F
 
+
 class SimpleObjectDetector(pl.LightningModule):
-    def __init__(self, resnet_version='resnet18', num_boxes=1, num_classes=80, learning_rate=1e-5):
+    def __init__(self, resnet_version='resnet18', num_boxes=1, num_classes=80, learning_rate=1e-3, input_size=512):
         super(SimpleObjectDetector, self).__init__()
         self.num_boxes = num_boxes
-        self.num_classes = num_classes  # Define the number of classes
+        self.num_classes = num_classes
         self.learning_rate = learning_rate
+        self.input_size = input_size
+        
+        # Define widths and heights
+        self.widths = torch.tensor([0.1, 0.2, 0.4], dtype=torch.float32, device='mps')
+        self.heights = torch.tensor([0.1, 0.2, 0.4], dtype=torch.float32, device='mps')
 
-        # Define anchor box sizes for three scales
-        self.anchors = torch.tensor([
-            [0.1, 0.1], [0.2, 0.2], [0.4, 0.4],  # Small scale
-            [0.1, 0.2], [0.2, 0.4], [0.4, 0.8],  # Medium scale
-            [0.2, 0.1], [0.4, 0.2], [0.8, 0.4]   # Large scale
-        ])  # (num_anchors, 2)
+        # Compute the number of anchor sizes
+        self.num_anchor_sizes = len(self.widths) * len(self.heights)
 
         # Initialize ResNet backbone based on specified version
         self.backbone = self._init_backbone(resnet_version)
         in_channels = self._get_in_channels(resnet_version)
 
+        # Compute expected feature map size
+        self.grid_height, self.grid_width = self._compute_feature_map_size(self.input_size)
+        
+        # Generate anchors once and register as buffer
+        self.anchors = self.generate_anchors(self.grid_height, self.grid_width)
+
         # Define dropout and advanced bbox regressor layers
         self.dropout = nn.Dropout(0.1)
         self.bbox_head = self._build_bbox_head(in_channels)
 
-        # Define classification head
-        #self.cls_head = self._build_cls_head(in_channels)
-        
-        #self.obj_head = self._build_obj_head(in_channels)
-
         # Initialize weights
         self._initialize_weights()
-        
-        self.cls_loss_function = nn.CrossEntropyLoss()  # Initialize the CrossEntropy loss
-        self.obj_loss_function = nn.BCEWithLogitsLoss()
-
 
     def _init_backbone(self, resnet_version):
         """Initialize the ResNet backbone."""
@@ -61,37 +60,13 @@ class SimpleObjectDetector(pl.LightningModule):
     def _build_bbox_head(self, in_channels):
         """Build the bounding box regressor head."""
         return nn.Sequential(
-            nn.Conv2d(in_channels, 1024, kernel_size=1),
+            nn.Conv2d(in_channels, 1024, kernel_size=1),  # Adjusted input channels
             nn.ReLU(),
             nn.BatchNorm2d(1024),
             nn.Conv2d(1024, 512, kernel_size=1),
             nn.ReLU(),
             nn.BatchNorm2d(512),
-            nn.Conv2d(512, 4 * self.num_boxes * len(self.anchors), kernel_size=1)
-        )
-
-    def _build_cls_head(self, in_channels):
-        """Build the classification head."""
-        return nn.Sequential(
-            nn.Conv2d(in_channels, 1024, kernel_size=1),
-            nn.ReLU(),
-            nn.BatchNorm2d(1024),
-            nn.Conv2d(1024, 512, kernel_size=1),
-            nn.ReLU(),
-            nn.BatchNorm2d(512),
-            nn.Conv2d(512, self.num_classes * self.num_boxes * len(self.anchors), kernel_size=1)
-        )
-        
-    def _build_obj_head(self, in_channels):
-        """Build the classification head."""
-        return nn.Sequential(
-            nn.Conv2d(in_channels, 1024, kernel_size=1),
-            nn.ReLU(),
-            nn.BatchNorm2d(1024),
-            nn.Conv2d(1024, 512, kernel_size=1),
-            nn.ReLU(),
-            nn.BatchNorm2d(512),
-            nn.Conv2d(512, self.num_boxes * len(self.anchors), kernel_size=1)
+            nn.Conv2d(512, 4 * self.num_boxes * self.num_anchor_sizes, kernel_size=1)
         )
 
     def _initialize_weights(self):
@@ -101,159 +76,249 @@ class SimpleObjectDetector(pl.LightningModule):
                 if isinstance(m, nn.Conv2d):
                     nn.init.normal_(m.weight, mean=0.0, std=0.01)
                     nn.init.constant_(m.bias, 0)
-                    
 
-    def forward(self, x):
-        """Forward pass through the network."""
+    def _compute_feature_map_size(self, input_size):
+        """Compute the feature map size given the input size."""
+        dummy_input = torch.zeros(1, 3, input_size, input_size)
+        with torch.no_grad():
+            dummy_features = self.backbone(dummy_input)
+        grid_height, grid_width = dummy_features.shape[2], dummy_features.shape[3]
+        return grid_height, grid_width
+
+    def forward(self, x, decode=True):
+        # Pass input through the backbone to get feature maps
         features = self.backbone(x)
-        features = self.dropout(features)
         
-        # print(features.shape)
-
-        # Predict bounding boxes
-        bbox_pred = self.bbox_head(features).permute(0, 2, 3, 1).contiguous().view(x.size(0), -1, 4)
-
-        # # Predict classification scores
-        # cls_pred = self.cls_head(features).permute(0, 2, 3, 1).contiguous().view(x.size(0), -1, self.num_classes)
+        # Pass features through the bounding box head
+        bbox_pred = self.bbox_head(features)  # Shape: (batch_size, 4 * num_anchor_sizes, grid_height, grid_width)
         
-        # # Predict objectness scores
-        # obj_pred = self.obj_head(features).permute(0, 2, 3, 1).contiguous().view(x.size(0), -1, 1)
-
-        # Apply sigmoid to dx, dy and exponential to dw, dh for stability in bbox predictions
-        #obj_pred = torch.sigmoid(obj_pred)
-        bbox_pred[..., :2] = torch.sigmoid(bbox_pred[..., :2])
-        bbox_pred[..., 2:] = torch.exp(bbox_pred[..., 2:])
+        batch_size = x.size(0)
+        grid_height = features.size(2)
+        grid_width = features.size(3)
         
-        return bbox_pred#, cls_pred, obj_pred
+        # Reshape bbox_pred to (batch_size, num_anchor_sizes, 4, grid_height, grid_width)
+        bbox_pred = bbox_pred.view(batch_size, self.num_anchor_sizes, 4, grid_height, grid_width)
+        
+        # Permute dimensions to (batch_size, grid_height, grid_width, num_anchor_sizes, 4)
+        bbox_pred = bbox_pred.permute(0, 3, 4, 1, 2)  # Shape: (batch_size, grid_height, grid_width, num_anchor_sizes, 4)
+        
+        # Flatten spatial dimensions and anchor sizes to get (batch_size, num_anchors, 4)
+        bbox_pred = bbox_pred.reshape(batch_size, -1, 4)
+        
+        if decode:
+            # Move anchors to the same device as input
+            anchors = self.anchors.to(x.device)
+            # Expand anchors to match batch size
+            anchors_expanded = anchors.unsqueeze(0).expand(batch_size, -1, -1)
+            # Decode the predicted offsets to get final bounding boxes
+            decoded_boxes = self.decode_boxes(bbox_pred, anchors_expanded)
+            return decoded_boxes
+        else:
+            return bbox_pred
 
 
-    def decode_anchors_to_image_space(self, anchors, feature_map_size, img_size):
+    def generate_anchors(self, grid_height, grid_width):
         """
-        Decode anchors from feature map space to image space.
+        Generates anchors based on the feature map size.
         """
-        num_anchors = anchors.shape[0]
-        
-        img_height, img_width = img_size
-        stride_h, stride_w = 32, 32
-        feature_map_height, feature_map_width = img_height // stride_h, img_width // stride_w
+        device = torch.device('mps')
+        # Generate normalized grid of anchor center positions
+        center_x = (torch.arange(grid_width, dtype=torch.float32, device=device) + 0.5) / grid_width
+        center_y = (torch.arange(grid_height, dtype=torch.float32, device=device) + 0.5) / grid_height
+        center_y, center_x = torch.meshgrid(center_y, center_x, indexing='ij')
+        anchor_centers = torch.stack([center_x, center_y], dim=-1).reshape(-1, 2)  # Shape: (num_anchor_centers, 2)
 
-        # Prepare tensors to hold the decoded anchors
-        decoded_anchors = torch.zeros((2304, 4), device=anchors.device)
+        # Anchor sizes in normalized coordinates
+        anchor_sizes = torch.stack(torch.meshgrid(self.widths, self.heights, indexing='ij'), dim=-1).reshape(-1, 2)  # Shape: (num_anchor_sizes, 2)
 
-        # Iterate over the feature map grid
-        idx = 0
-        for i in range(feature_map_height):
-            for j in range(feature_map_width):
-                # Convert anchor box ratios to image size
-                for anchor in anchors:
-                    anchor_width = anchor[0] * img_width
-                    anchor_height = anchor[1] * img_height
+        # Get all combinations of centers and sizes
+        num_anchor_centers = anchor_centers.size(0)
+        num_anchor_sizes = anchor_sizes.size(0)
+        anchor_centers = anchor_centers.repeat_interleave(num_anchor_sizes, dim=0)
+        anchor_sizes = anchor_sizes.repeat(num_anchor_centers, 1)
 
-                    # Calculate center of the anchor in image space
-                    x_center = (j + 0.5) * stride_w  # Anchor centered in the grid cell
-                    y_center = (i + 0.5) * stride_h  # Anchor centered in the grid cell
+        # Combine centers and sizes to get anchors
+        anchors = torch.cat([anchor_centers, anchor_sizes], dim=1)  # Shape: (num_anchors, 4)
+        return anchors
 
-                    # Store decoded anchor (x_center, y_center, width, height)
-                    decoded_anchors[idx, :] = torch.tensor([x_center, y_center, anchor_width, anchor_height])
-                    idx += 1
 
-        return decoded_anchors
+    def encode_boxes(self, gt_boxes, anchors):
+        """
+        Encodes the ground truth boxes relative to the anchors.
+        gt_boxes: Tensor of shape (num_anchors, 4)
+        anchors: Tensor of shape (num_anchors, 4)
+        """
+        # Ground truth box parameters
+        gt_x_min = gt_boxes[..., 0]
+        gt_y_min = gt_boxes[..., 1]
+        gt_x_max = gt_boxes[..., 2]
+        gt_y_max = gt_boxes[..., 3]
+        gt_center_x = (gt_x_min + gt_x_max) / 2.0
+        gt_center_y = (gt_y_min + gt_y_max) / 2.0
+        gt_width = gt_x_max - gt_x_min
+        gt_height = gt_y_max - gt_y_min
 
+        # Anchor box parameters
+        anchor_center_x = anchors[..., 0]
+        anchor_center_y = anchors[..., 1]
+        anchor_width = anchors[..., 2]
+        anchor_height = anchors[..., 3]
+
+        # Encoding
+        t_x = (gt_center_x - anchor_center_x) / anchor_width
+        t_y = (gt_center_y - anchor_center_y) / anchor_height
+        t_w = torch.log(gt_width / anchor_width)
+        t_h = torch.log(gt_height / anchor_height)
+
+        encoded_boxes = torch.stack([t_x, t_y, t_w, t_h], dim=-1)
+        return encoded_boxes
+
+    def decode_boxes(self, bbox_pred, anchors):
+        """
+        Decodes the predicted bounding boxes relative to the provided anchors.
+        bbox_pred: Tensor of shape (batch_size, num_anchors, 4)
+        anchors: Tensor of shape (batch_size, num_anchors, 4)
+        """
+        # Predicted offsets
+        t_x = bbox_pred[..., 0]
+        t_y = bbox_pred[..., 1]
+        t_w = bbox_pred[..., 2]
+        t_h = bbox_pred[..., 3]
+
+        # Anchor box parameters
+        anchor_center_x = anchors[..., 0]
+        anchor_center_y = anchors[..., 1]
+        anchor_width = anchors[..., 2]
+        anchor_height = anchors[..., 3]
+
+        # Decoding
+        decoded_center_x = t_x * anchor_width + anchor_center_x
+        decoded_center_y = t_y * anchor_height + anchor_center_y
+        decoded_width = torch.exp(t_w) * anchor_width
+        decoded_height = torch.exp(t_h) * anchor_height
+
+        # Convert to (x_min, y_min, x_max, y_max)
+        x_min = decoded_center_x - 0.5 * decoded_width
+        y_min = decoded_center_y - 0.5 * decoded_height
+        x_max = decoded_center_x + 0.5 * decoded_width
+        y_max = decoded_center_y + 0.5 * decoded_height
+
+        decoded_boxes = torch.stack([x_min, y_min, x_max, y_max], dim=-1)
+        return decoded_boxes
+
+    @staticmethod
+    def convert_anchors_to_corners(anchors):
+        """
+        Converts anchors from (center_x, center_y, width, height) to (x_min, y_min, x_max, y_max).
+        """
+        cx = anchors[..., 0]
+        cy = anchors[..., 1]
+        w = anchors[..., 2]
+        h = anchors[..., 3]
+        x_min = cx - 0.5 * w
+        y_min = cy - 0.5 * h
+        x_max = cx + 0.5 * w
+        y_max = cy + 0.5 * h
+        return torch.stack([x_min, y_min, x_max, y_max], dim=-1)
 
     @staticmethod
     def match_anchors_to_ground_truth(anchors, ground_truth_boxes, iou_threshold=0.5):
-        # Ensure anchors and ground_truth_boxes are 3D for IoU computation
-        if anchors.dim() == 2:
-            anchors = anchors.unsqueeze(0)
-        if ground_truth_boxes.dim() == 2:
-            ground_truth_boxes = ground_truth_boxes.unsqueeze(0)
+        batch_size = anchors.size(0)
+        num_anchors = anchors.size(1)
+        positive_masks = []
+        negative_masks = []
+        anchor_to_gt_assignments = []
 
-        # Move ground truth boxes to the same device as anchors
-        ground_truth_boxes = ground_truth_boxes.to(anchors.device)
+        for i in range(batch_size):
+            anchors_per_image = anchors[i]  # Shape: (num_anchors, 4)
+            gt_boxes_per_image = ground_truth_boxes[i]  # Shape: (num_gt_boxes_i, 4)
+            num_gt_boxes = gt_boxes_per_image.size(0)
 
-        # Compute IoU between each anchor and each ground truth box
-        iou_matrix = compute_iou(anchors, ground_truth_boxes)  # Shape: (batch_size, num_anchors, num_gt_boxes)
+            # Convert anchors to (x_min, y_min, x_max, y_max)
+            anchors_corners = SimpleObjectDetector.convert_anchors_to_corners(anchors_per_image)
 
-        # Precompute max IoU and best-matching ground truth for each anchor
-        max_iou_per_anchor, best_gt_per_anchor = torch.max(iou_matrix, dim=2)  # Shape: (batch_size, nr predictions)
+            if num_gt_boxes == 0:
+                # No ground truth boxes in this image
+                positive_mask = torch.zeros(num_anchors, dtype=torch.bool, device=anchors.device)
+                negative_mask = torch.ones(num_anchors, dtype=torch.bool, device=anchors.device)
+                anchor_to_gt_assignment = torch.full((num_anchors,), -1, dtype=torch.long, device=anchors.device)
+            else:
+                iou_matrix = compute_iou(anchors_corners.unsqueeze(0), gt_boxes_per_image.unsqueeze(0))[0]
+                max_iou_per_anchor, best_gt_per_anchor = iou_matrix.max(dim=1)
 
-        # Find positive anchors based on IoU threshold high
-        positive_anchors_mask = (max_iou_per_anchor >= iou_threshold)  # Shape: (batch_size, nr predictions)
+                positive_mask = max_iou_per_anchor >= iou_threshold
+                negative_mask = max_iou_per_anchor < iou_threshold
+                anchor_to_gt_assignment = torch.where(
+                    positive_mask, best_gt_per_anchor, torch.full_like(best_gt_per_anchor, -1)
+                )
 
-        # Find negative anchors based on IoU threshold low
-        negative_anchors_mask = (max_iou_per_anchor < iou_threshold)
+            positive_masks.append(positive_mask)
+            negative_masks.append(negative_mask)
+            anchor_to_gt_assignments.append(anchor_to_gt_assignment)
 
-        # Prepare the assignment of anchors to ground truths
-        anchor_to_gt_assignment = torch.where(positive_anchors_mask, best_gt_per_anchor, -1 * torch.ones_like(best_gt_per_anchor))
-        
-        # Return masks for positive, neutral, and negative anchors
-        return positive_anchors_mask, negative_anchors_mask, anchor_to_gt_assignment  # Shape: (batch_size, nr predictions)
+        positive_mask = torch.stack(positive_masks)
+        negative_mask = torch.stack(negative_masks)
+        anchor_to_gt_assignment = torch.stack(anchor_to_gt_assignments)
 
+        return positive_mask, negative_mask, anchor_to_gt_assignment
 
     def training_step(self, batch, batch_idx):
         images, targets_cls, targets_bbox, targets_obj = batch
+        device = images.device
 
-        # Forward pass through the model to get predictions
-        pred_bbox = self(images)
+        # Forward pass
+        pred_bbox = self(images, decode=False)
 
-        # Assume pred_bbox is of shape (batch_size, num_anchors, 4) and represents predicted bounding boxes.
-        # pred_cls is of shape (batch_size, num_anchors, num_classes) for class predictions.
-        # pred_obj is of shape (batch_size, num_anchors) representing objectness scores.
-        
         batch_size = images.size(0)
         num_anchors = pred_bbox.size(1)
 
-        # Compute the ground truth matching for anchors
+        # Use anchors from the model
+        anchors_expanded = self.anchors.unsqueeze(0).expand(batch_size, -1, -1).to(device)
+
+        # Match anchors to ground truth boxes
         positive_mask, negative_mask, anchor_to_gt_assignment = self.match_anchors_to_ground_truth(
-            pred_bbox, targets_bbox, iou_threshold=0.5
+            anchors_expanded, targets_bbox, iou_threshold=0.5
         )
 
-        # Initialize losses
-        loss_bbox = 0
-        loss_cls = 0
-        loss_obj = 0
+        # Ensure anchor_to_gt_assignment has valid indices
+        anchor_to_gt_assignment = anchor_to_gt_assignment.long()
 
-        for b in range(batch_size):
-            # Extract the relevant ground truth for the current batch item
-            gt_cls = targets_cls[b]  # Shape: (num_gt_boxes, num_classes)
-            gt_bbox = targets_bbox[b]  # Shape: (num_gt_boxes, 4)
-            gt_obj = targets_obj[b]  # Shape: (num_gt_boxes)
+        # Compute loss only for positive anchors
+        if positive_mask.any():
+            # Get indices of positive anchors
+            positive_anchor_indices = positive_mask.nonzero(as_tuple=True)
 
-            # Retrieve the matched ground truth boxes for positive anchors
-            pos_anchors = positive_mask[b]
-            matched_gt_indices = anchor_to_gt_assignment[b][pos_anchors]
+            # Get the matched ground truth indices
+            matched_gt_indices = anchor_to_gt_assignment[positive_anchor_indices]
 
-            if matched_gt_indices.numel() > 0:
-                # Bounding Box Loss (e.g., Smooth L1 or GIoU Loss)
-                matched_pred_bbox = pred_bbox[b][pos_anchors]
-                matched_gt_bbox = gt_bbox[matched_gt_indices]
-                
-                loss_bbox += F.smooth_l1_loss(matched_pred_bbox, matched_gt_bbox)
+            # Gather the matched ground truth boxes
+            matched_gt_boxes = targets_bbox[positive_anchor_indices[0], matched_gt_indices]
 
-        total_loss = loss_bbox
-        
-        # Log the losses
-        # self.log('cls_loss', cls_loss_weight * loss_cls, prog_bar=True, on_step=True, on_epoch=True)
-        # self.log('bbox_loss', reg_loss_weight * loss_bbox, prog_bar=True, on_step=True, on_epoch=True)
-        # self.log('obj_loss', obj_loss_weight * loss_obj, prog_bar=True, on_step=True, on_epoch=True)
-        self.log('total_loss', total_loss, prog_bar=True, on_step=True, on_epoch=True)
+            # Get anchors for positive anchors
+            anchors_positive = anchors_expanded[positive_anchor_indices]
 
-        # Log or return the loss
-        return total_loss
+            # Encode ground truth boxes relative to anchors
+            target_reg = self.encode_boxes(matched_gt_boxes, anchors_positive)
+
+            # Get predicted offsets for positive anchors
+            pred_reg = pred_bbox[positive_anchor_indices]
+
+            # Compute loss
+            loss = F.smooth_l1_loss(pred_reg, target_reg)
+        else:
+            # No positive samples, set loss to zero
+            loss = torch.tensor(0.0, device=device, requires_grad=True)
+
+        # Log and return loss
+        self.log('total_loss', loss, prog_bar=True, on_step=True, on_epoch=True)
+        return loss
 
     def on_train_epoch_end(self):
         # Access the average metrics for the epoch
         avg_total_loss = self.trainer.callback_metrics['total_loss'].item()
-        # avg_bbox_loss = self.trainer.callback_metrics['bbox_loss'].item()
-        # avg_cls_loss = self.trainer.callback_metrics['cls_loss'].item()
-        # avg_obj_loss = self.trainer.callback_metrics['obj_loss'].item()
 
         # Print the metrics
         print(f"Epoch {self.current_epoch} - Avg Total Loss: {avg_total_loss:.4f}")
-        # print(f"Epoch {self.current_epoch} - Avg Reg Loss: {avg_bbox_loss:.4f}")
-        # print(f"Epoch {self.current_epoch} - Avg Cls Loss: {avg_cls_loss:.4f}")
-        # print(f"Epoch {self.current_epoch} - Avg Obj Loss: {avg_obj_loss:.4f}")
-
 
     def configure_optimizers(self):
         optimizer = optim.SGD(self.parameters(), lr=self.learning_rate, momentum=0.9)
