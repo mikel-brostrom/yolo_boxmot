@@ -7,6 +7,39 @@ import torchvision.models as models
 from simple_yolo.assignment import compute_ciou, compute_iou
 from scipy.optimize import linear_sum_assignment
 import torch.nn.functional as F
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+
+
+def visualize_assignments(image, gt_boxes, target_obj, grid_width, grid_height, num_anchor_sizes, batch_size):
+    fig, ax = plt.subplots(1)
+    normalized_image = image.permute(1, 2, 0).cpu().numpy()
+    denormalized_image = (normalized_image * [0.229, 0.224, 0.225] + [0.485, 0.456, 0.406]).clip(0, 1)
+
+    ax.imshow(denormalized_image)
+
+    image_height, image_width = 512, 512
+
+    for b in range(batch_size):
+        for i in range(grid_height):
+            for j in range(grid_width):
+                for anchor_idx in range(num_anchor_sizes):
+                    if target_obj[b, i, j, anchor_idx, 0] == 1:
+                        # Convert normalized grid coordinates to pixel values
+                        x = j * (image_width / grid_width)
+                        y = i * (image_height / grid_height)
+                        width = image_width / grid_width
+                        height = image_height / grid_height
+                        
+                        # Draw the rectangle
+                        rect = patches.Rectangle(
+                            (x, y),
+                            width, height,
+                            linewidth=1, edgecolor='r', facecolor='none'
+                        )
+                        ax.add_patch(rect)
+
+    plt.show()
 
 
 class SimpleObjectDetector(pl.LightningModule):
@@ -18,8 +51,8 @@ class SimpleObjectDetector(pl.LightningModule):
         self.input_size = input_size
         
         # Define widths and heights
-        self.widths = torch.tensor([0.1, 0.2, 0.4], dtype=torch.float32, device='mps')
-        self.heights = torch.tensor([0.1, 0.2, 0.4], dtype=torch.float32, device='mps')
+        self.widths = torch.tensor([0.1, 0.2, 0.4, 0.8], dtype=torch.float32, device='mps')
+        self.heights = torch.tensor([0.1, 0.2, 0.4, 0.8], dtype=torch.float32, device='mps')
 
         # Compute the number of anchor sizes
         self.num_anchor_sizes = len(self.widths) * len(self.heights)
@@ -92,12 +125,15 @@ class SimpleObjectDetector(pl.LightningModule):
         )
 
     def _initialize_weights(self):
-        """Initialize the weights of the heads."""
         for head in [self.bbox_head, self.objectness_head, self.class_head]:
             for m in head:
                 if isinstance(m, nn.Conv2d):
                     nn.init.normal_(m.weight, mean=0.0, std=0.01)
-                    nn.init.constant_(m.bias, 0)
+                    if head is self.objectness_head:
+                        nn.init.constant_(m.bias, -4.0)  # Example negative bias
+                    else:
+                        nn.init.constant_(m.bias, 0)
+
 
     def _compute_feature_map_size(self, input_size):
         """Compute the feature map size given the input size."""
@@ -228,120 +264,29 @@ class SimpleObjectDetector(pl.LightningModule):
 
 
     def training_step(self, batch, batch_idx):
-        images, targets_cls, targets_bbox, _ = batch  # bbox in normalized [0, 1] x1, y1, x2, y2 format
+        images, targets_cls, targets_bbox, _ = batch
         device = images.device
         batch_size = images.size(0)
 
         # Forward pass
-        pred_bbox, pred_obj, pred_class = self(images, decode=False)  # Shapes as specified
-
-        # Get shapes
-        grid_height = pred_bbox.size(1)
-        grid_width = pred_bbox.size(2)
-        num_anchor_sizes = pred_bbox.size(3)
-        num_classes = pred_class.size(-1)
+        pred_bbox, pred_obj, pred_class = self(images, decode=False)
 
         # Get anchors
-        anchors = self.anchors.to(device)  # Shape: (grid_height, grid_width, num_anchor_sizes, 4)
+        anchors = self.anchors.to(device)
 
         # Initialize target tensors
-        target_obj = torch.zeros_like(pred_obj, device=device)  # Shape: (batch_size, grid_h, grid_w, num_anchor_sizes, 1)
-        target_bbox = torch.zeros_like(pred_bbox, device=device)  # Shape: (batch_size, grid_h, grid_w, num_anchor_sizes, 4)
-        target_class = torch.zeros_like(pred_class, device=device)  # Shape: (batch_size, grid_h, grid_w, num_anchor_sizes, num_classes)
+        target_obj, target_bbox, target_class = self.initialize_target_tensors(pred_obj, pred_bbox, pred_class)
 
-        # For each image in the batch
-        for b in range(batch_size):
-            gt_boxes = targets_bbox[b].to(device)  # Shape: (num_gt_boxes, 4)
-            gt_labels = targets_cls[b].to(device).long()  # Shape: (num_gt_boxes,)
-            num_gt_boxes = gt_boxes.size(0)
+        # Process batch
+        self.assign_targets_to_anchors(
+            batch_size, targets_bbox, targets_cls, target_obj, target_bbox, target_class, anchors
+        )
 
-            for idx in range(num_gt_boxes):
-                gt_box = gt_boxes[idx]  # (x_min, y_min, x_max, y_max)
-                gt_label = gt_labels[idx]  # Scalar
-
-                # Calculate center coordinates and size of the ground truth box
-                gt_x = (gt_box[0] + gt_box[2]) / 2.0
-                gt_y = (gt_box[1] + gt_box[3]) / 2.0
-                gt_w = gt_box[2] - gt_box[0]
-                gt_h = gt_box[3] - gt_box[1]
-
-                # Determine which grid cell the center falls into
-                grid_x = int(gt_x * grid_width)
-                grid_y = int(gt_y * grid_height)
-                grid_x = min(grid_width - 1, max(0, grid_x))
-                grid_y = min(grid_height - 1, max(0, grid_y))
-
-                # Get anchors at the grid cell
-                anchors_at_cell = anchors[grid_y, grid_x]  # Shape: (num_anchor_sizes, 4)
-
-                # Convert anchors to corners for IoU calculation
-                anchors_corners = self.convert_anchors_to_corners(anchors_at_cell)  # Should return (num_anchor_sizes, 4)
-
-                # Ground truth box in corner format
-                gt_box_corners = gt_box.unsqueeze(0)  # Shape: (1, 4)
-
-                # Compute IoU between ground truth box and anchors
-                iou_scores = compute_iou(gt_box_corners, anchors_corners)  # Shape: (1, num_anchor_sizes)
-
-                # Ensure iou_scores is a 1D tensor
-                iou_scores = iou_scores.squeeze(0).squeeze(0)  # Shape: (num_anchor_sizes,)
-
-                # Find the best matching anchor
-                best_anchor_idx = torch.argmax(iou_scores).item()  # Convert to scalar integer
-
-                # Assign positive example
-                target_obj[b, grid_y, grid_x, best_anchor_idx, 0] = 1.0
-
-                # Compute bbox regression targets
-                tx = gt_x * grid_width - grid_x
-                ty = gt_y * grid_height - grid_y
-                tw = torch.log(gt_w / anchors_at_cell[best_anchor_idx, 2] + 1e-16)
-                th = torch.log(gt_h / anchors_at_cell[best_anchor_idx, 3] + 1e-16)
-
-                target_bbox[b, grid_y, grid_x, best_anchor_idx] = torch.tensor([tx, ty, tw, th], device=device)
-
-                # Set target class (one-hot encoding)
-                target_class[b, grid_y, grid_x, best_anchor_idx, gt_label] = 1.0
-
-                # Ignore other anchors with high IoU
-                ignore_iou_thresh = 0.5
-                for anchor_idx in range(num_anchor_sizes):
-                    if (anchor_idx != best_anchor_idx) and (iou_scores[anchor_idx].item() > ignore_iou_thresh):
-                        target_obj[b, grid_y, grid_x, anchor_idx, 0] = -1.0  # Ignore this anchor
-
-        # Compute objectness loss
-        obj_mask = target_obj != -1  # Boolean mask where target_obj is not -1 (i.e., not ignored)
-        obj_pred_filtered = pred_obj[obj_mask].view(-1)
-        target_obj_filtered = target_obj[obj_mask].view(-1)
-        obj_loss = F.binary_cross_entropy_with_logits(obj_pred_filtered, target_obj_filtered, reduction='mean')
-
-        # Compute bounding box loss
-        pos_mask = (target_obj == 1).squeeze(-1)  # Shape: [batch_size, grid_h, grid_w, num_anchor_sizes]
-        num_pos = pos_mask.sum()
-
-        if num_pos > 0:
-            # Extract positive predictions and targets
-            pred_bbox_pos = pred_bbox[pos_mask].view(-1, 4)
-            target_bbox_pos = target_bbox[pos_mask].view(-1, 4)
-
-            # Bounding box regression loss (e.g., Smooth L1 loss)
-            bbox_loss = F.smooth_l1_loss(pred_bbox_pos, target_bbox_pos, reduction='mean')
-
-            # Classification loss
-            pred_class_pos = pred_class[pos_mask].view(-1, self.num_classes)
-            target_class_pos = target_class[pos_mask].view(-1, self.num_classes)
-
-            # Convert target classes from one-hot encoding to class indices
-            target_class_indices = target_class_pos.argmax(dim=1)
-
-            # Compute classification loss
-            class_loss = F.cross_entropy(pred_class_pos, target_class_indices, reduction='mean')
-        else:
-            bbox_loss = torch.tensor(0.0, device=device)
-            class_loss = torch.tensor(0.0, device=device)
+        # Compute losses
+        obj_loss, bbox_loss, class_loss = self.compute_losses(pred_bbox, pred_obj, pred_class, target_obj, target_bbox, target_class)
 
         # Total loss
-        total_loss = obj_loss + bbox_loss + class_loss
+        total_loss = sum(w * l for w, l in zip([1.0, 5.0, 2.0], [obj_loss, bbox_loss, class_loss]))
 
         # Log losses
         self.log('total_loss', total_loss, on_step=False, on_epoch=True, prog_bar=True)
@@ -352,8 +297,87 @@ class SimpleObjectDetector(pl.LightningModule):
         return total_loss
 
 
+    def initialize_target_tensors(self, pred_obj, pred_bbox, pred_class):
+        device = pred_obj.device
+        target_obj = torch.zeros_like(pred_obj, device=device)
+        target_bbox = torch.zeros_like(pred_bbox, device=device)
+        target_class = torch.zeros_like(pred_class, device=device)
+        return target_obj, target_bbox, target_class
 
-        
+
+    def assign_targets_to_anchors(self, batch_size, targets_bbox, targets_cls, target_obj, target_bbox, target_class, anchors):
+        grid_height, grid_width = anchors.size(0), anchors.size(1)
+        num_anchor_sizes = anchors.size(2)
+
+        for b in range(batch_size):
+            gt_boxes = targets_bbox[b].to(target_obj.device)
+            gt_labels = targets_cls[b].to(target_obj.device).long()
+            num_gt_boxes = gt_boxes.size(0)
+
+            for idx in range(num_gt_boxes):
+                gt_box, gt_label = gt_boxes[idx], gt_labels[idx]
+
+                gt_x = (gt_box[0] + gt_box[2]) / 2.0
+                gt_y = (gt_box[1] + gt_box[3]) / 2.0
+                gt_w = gt_box[2] - gt_box[0]
+                gt_h = gt_box[3] - gt_box[1]
+                
+                grid_x = int(gt_x * grid_width)
+                grid_y = int(gt_y * grid_height)
+                grid_x = min(grid_width - 1, max(0, grid_x))
+                grid_y = min(grid_height - 1, max(0, grid_y))
+
+                anchors_at_cell = anchors[grid_y, grid_x]
+                anchors_corners = self.convert_anchors_to_corners(anchors_at_cell)
+                gt_box_corners = gt_box.unsqueeze(0)
+                iou_scores = compute_iou(gt_box_corners, anchors_corners).squeeze()
+
+                best_anchor_idx = torch.argmax(iou_scores).item()
+                
+                # assign positive
+                target_obj[b, grid_y, grid_x, best_anchor_idx, 0] = 1
+
+                tx = gt_x * target_bbox.size(2) - grid_x
+                ty = gt_y * target_bbox.size(1) - grid_y
+                tw = torch.log(gt_w / anchors_at_cell[best_anchor_idx, 2] + 1e-16)
+                th = torch.log(gt_h / anchors_at_cell[best_anchor_idx, 3] + 1e-16)
+
+                target_bbox[b, grid_y, grid_x, best_anchor_idx] = torch.tensor([tx, ty, tw, th], device=target_bbox.device)
+                target_class[b, grid_y, grid_x, best_anchor_idx, gt_label] = 1
+
+                # ignore high IoU
+                ignore_iou_thresh = 0.5
+                for anchor_idx in range(num_anchor_sizes):
+                    if anchor_idx != best_anchor_idx and iou_scores[anchor_idx].item() > ignore_iou_thresh:
+                        target_obj[b, grid_y, grid_x, anchor_idx, 0] = -1
+
+
+    def compute_losses(self, pred_bbox, pred_obj, pred_class, target_obj, target_bbox, target_class):
+        device = target_obj.device
+
+        obj_mask = target_obj != -1
+        obj_pred_filtered = pred_obj[obj_mask].view(-1)
+        target_obj_filtered = target_obj[obj_mask].view(-1)
+        obj_loss = F.binary_cross_entropy_with_logits(obj_pred_filtered, target_obj_filtered, reduction='mean')
+
+        pos_mask = (target_obj == 1).squeeze(-1)
+        num_pos = pos_mask.sum()
+
+        if num_pos > 0:
+            pred_bbox_pos = pred_bbox[pos_mask].view(-1, 4)
+            target_bbox_pos = target_bbox[pos_mask].view(-1, 4)
+            bbox_loss = F.smooth_l1_loss(pred_bbox_pos, target_bbox_pos, reduction='mean')
+
+            pred_class_pos = pred_class[pos_mask].view(-1, self.num_classes)
+            target_class_pos = target_class[pos_mask].view(-1, self.num_classes)
+            target_class_indices = target_class_pos.argmax(dim=1)
+            class_loss = F.cross_entropy(pred_class_pos, target_class_indices, reduction='mean')
+        else:
+            bbox_loss = torch.tensor(0.0, device=device)
+            class_loss = torch.tensor(0.0, device=device)
+
+        return obj_loss, bbox_loss, class_loss
+
 
     def on_train_epoch_end(self):
         # Access the average metrics for the epoch

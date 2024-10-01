@@ -89,7 +89,7 @@ def visualize_predictions(image, boxes, scores, classes):
 
 def main():
     # Paths
-    checkpoint_path = "/Users/mikel.brostrom/yolo_boxmot/lightning_logs/version_154/checkpoints/yolo-epoch=02-avg_train_loss=0.00.ckpt"  # Path to the trained weights
+    checkpoint_path = "/Users/mikel.brostrom/yolo_boxmot/lightning_logs/version_155/checkpoints/yolo-epoch=19-avg_train_loss=0.00.ckpt"  # Path to the trained weights
     image_path = "coco128/coco128/images/train2017/000000000025.jpg"  # Example image from COCO128
 
     # Load the trained model
