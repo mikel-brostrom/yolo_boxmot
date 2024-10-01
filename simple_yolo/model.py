@@ -10,8 +10,20 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
-
 def visualize_assignments(image, gt_boxes, target_obj, grid_width, grid_height, num_anchor_sizes, batch_size):
+    """
+    Visualizes the assignment of ground-truth boxes to anchor grid cells on an image.
+    
+    Args:
+        image (Tensor): The input image tensor of shape (C, H, W).
+        gt_boxes (Tensor): Ground-truth bounding boxes.
+        target_obj (Tensor): Target object presence tensor.
+        grid_width (int): Width of the feature grid.
+        grid_height (int): Height of the feature grid.
+        num_anchor_sizes (int): Number of anchor sizes.
+        batch_size (int): Batch size of the input.
+    
+    """
     fig, ax = plt.subplots(1)
     normalized_image = image.permute(1, 2, 0).cpu().numpy()
     denormalized_image = (normalized_image * [0.229, 0.224, 0.225] + [0.485, 0.456, 0.406]).clip(0, 1)
@@ -41,8 +53,18 @@ def visualize_assignments(image, gt_boxes, target_obj, grid_width, grid_height, 
 
     plt.show()
 
-
 class SimpleObjectDetector(pl.LightningModule):
+    """
+    A simple object detection model based on a modified ResNet backbone.
+    
+    Args:
+        resnet_version (str): The version of ResNet to use ('resnet18', 'resnet34', or 'resnet50').
+        num_boxes (int): Number of boxes per cell.
+        num_classes (int): Number of classes for classification.
+        learning_rate (float): Learning rate for optimizer.
+        input_size (int): Input image size.
+    """
+    
     def __init__(self, resnet_version='resnet18', num_boxes=1, num_classes=80, learning_rate=1e-3, input_size=512):
         super(SimpleObjectDetector, self).__init__()
         self.num_boxes = num_boxes
@@ -50,7 +72,7 @@ class SimpleObjectDetector(pl.LightningModule):
         self.learning_rate = learning_rate
         self.input_size = input_size
         
-        # Define widths and heights
+        # Define widths and heights for anchors
         self.widths = torch.tensor([0.1, 0.2, 0.4, 0.8], dtype=torch.float32, device='mps')
         self.heights = torch.tensor([0.1, 0.2, 0.4, 0.8], dtype=torch.float32, device='mps')
 
@@ -79,7 +101,15 @@ class SimpleObjectDetector(pl.LightningModule):
         self._initialize_weights()
 
     def _init_backbone(self, resnet_version):
-        """Initialize the ResNet backbone."""
+        """
+        Initialize the ResNet backbone.
+        
+        Args:
+            resnet_version (str): ResNet version ('resnet18', 'resnet34', 'resnet50').
+
+        Returns:
+            nn.Module: ResNet backbone without fully connected layers.
+        """
         resnet_versions = {
             'resnet18': models.resnet18,
             'resnet34': models.resnet34,
@@ -91,13 +121,29 @@ class SimpleObjectDetector(pl.LightningModule):
         return nn.Sequential(*list(backbone.children())[:-2])  # Remove fully connected layers
 
     def _get_in_channels(self, resnet_version):
-        """Return the number of input channels based on ResNet version."""
+        """
+        Return the number of input channels based on ResNet version.
+        
+        Args:
+            resnet_version (str): ResNet version ('resnet18', 'resnet34', 'resnet50').
+
+        Returns:
+            int: Number of output channels from ResNet backbone.
+        """
         return 512 if resnet_version in ['resnet18', 'resnet34'] else 2048
 
     def _build_bbox_head(self, in_channels):
-        """Build the bounding box regressor head."""
+        """
+        Build the bounding box regressor head.
+
+        Args:
+            in_channels (int): Number of input channels for the bbox head.
+
+        Returns:
+            nn.Sequential: Bounding box regression head.
+        """
         return nn.Sequential(
-            nn.Conv2d(in_channels, 1024, kernel_size=1),  # Adjusted input channels
+            nn.Conv2d(in_channels, 1024, kernel_size=1),
             nn.ReLU(),
             nn.BatchNorm2d(1024),
             nn.Conv2d(1024, 512, kernel_size=1),
@@ -107,7 +153,15 @@ class SimpleObjectDetector(pl.LightningModule):
         )
 
     def _build_objectness_head(self, in_channels):
-        """Build the objectness head."""
+        """
+        Build the objectness head.
+
+        Args:
+            in_channels (int): Number of input channels for the objectness head.
+
+        Returns:
+            nn.Sequential: Objectness head.
+        """
         return nn.Sequential(
             nn.Conv2d(in_channels, 512, kernel_size=1),
             nn.ReLU(),
@@ -116,7 +170,15 @@ class SimpleObjectDetector(pl.LightningModule):
         )
 
     def _build_class_head(self, in_channels):
-        """Build the class prediction head."""
+        """
+        Build the class prediction head.
+
+        Args:
+            in_channels (int): Number of input channels for the class head.
+
+        Returns:
+            nn.Sequential: Class prediction head.
+        """
         return nn.Sequential(
             nn.Conv2d(in_channels, 512, kernel_size=1),
             nn.ReLU(),
@@ -125,6 +187,9 @@ class SimpleObjectDetector(pl.LightningModule):
         )
 
     def _initialize_weights(self):
+        """
+        Initialize the weights of the model's layers.
+        """
         for head in [self.bbox_head, self.objectness_head, self.class_head]:
             for m in head:
                 if isinstance(m, nn.Conv2d):
@@ -134,27 +199,42 @@ class SimpleObjectDetector(pl.LightningModule):
                     else:
                         nn.init.constant_(m.bias, 0)
 
-
     def _compute_feature_map_size(self, input_size):
-        """Compute the feature map size given the input size."""
+        """
+        Compute the feature map size given the input size.
+
+        Args:
+            input_size (int): Input image size.
+
+        Returns:
+            tuple: Height and width of the feature map.
+        """
         dummy_input = torch.zeros(1, 3, input_size, input_size)
         with torch.no_grad():
             dummy_features = self.backbone(dummy_input)
         grid_height, grid_width = dummy_features.shape[2], dummy_features.shape[3]
         return grid_height, grid_width
 
-
     def forward(self, x, decode=False):
+        """
+        Forward pass through the model.
+        
+        Args:
+            x (Tensor): Input tensor of shape (batch_size, 3, H, W).
+            decode (bool): Whether to decode the bounding boxes.
+
+        Returns:
+            Tuple of Tensors: (bbox_pred, obj_pred, class_pred) if decode is False.
+                              (decoded_boxes, obj_pred, class_pred) if decode is True.
+        """
         # Pass input through the backbone to get feature maps
         features = self.backbone(x)
-        
-        # print('features.shape', features.shape)
-        
+
         # Pass features through the heads
-        bbox_pred = self.bbox_head(features)  # Shape: (batch_size, 4 * num_anchor_sizes, grid_height, grid_width)
-        obj_pred = self.objectness_head(features)  # Shape: (batch_size, num_anchor_sizes, grid_height, grid_width)
-        class_pred = self.class_head(features)  # Shape: (batch_size, num_classes * num_anchor_sizes, grid_height, grid_width)
-        
+        bbox_pred = self.bbox_head(features)  # Bounding box prediction
+        obj_pred = self.objectness_head(features)  # Objectness prediction
+        class_pred = self.class_head(features)  # Class prediction
+
         batch_size = x.size(0)
         grid_height = features.size(2)
         grid_width = features.size(3)
@@ -162,34 +242,18 @@ class SimpleObjectDetector(pl.LightningModule):
         # Reshape bbox_pred to separate grid dimensions and anchor dimension
         bbox_pred = bbox_pred.view(batch_size, self.num_anchor_sizes, 4, grid_height, grid_width)
         bbox_pred = bbox_pred.permute(0, 3, 4, 1, 2)  # Shape: (batch_size, grid_height, grid_width, num_anchor_sizes, 4)
-        bbox_pred = bbox_pred.contiguous()  # Ensure contiguous memory layout
+        bbox_pred = bbox_pred.contiguous()
 
-        # Reshape obj_pred to separate grid dimensions and anchor dimension
+        # Reshape obj_pred and class_pred similarly
         obj_pred = obj_pred.view(batch_size, self.num_anchor_sizes, 1, grid_height, grid_width)
-        obj_pred = obj_pred.permute(0, 3, 4, 1, 2)  # Shape: (batch_size, grid_height, grid_width, num_anchor_sizes, 1)
-        obj_pred = obj_pred.contiguous()
+        obj_pred = obj_pred.permute(0, 3, 4, 1, 2).contiguous()
 
-        # Reshape class_pred to separate grid dimensions and anchor dimension
         class_pred = class_pred.view(batch_size, self.num_anchor_sizes, self.num_classes, grid_height, grid_width)
-        class_pred = class_pred.permute(0, 3, 4, 1, 2)  # Shape: (batch_size, grid_height, grid_width, num_anchor_sizes, num_classes)
-        class_pred = class_pred.contiguous()
+        class_pred = class_pred.permute(0, 3, 4, 1, 2).contiguous()
 
-        # Reshape to get final shape as (batch_size, grid_height, grid_width, ...)
-        bbox_pred = bbox_pred.view(batch_size, grid_height, grid_width, self.num_anchor_sizes, 4)
-        obj_pred = obj_pred.view(batch_size, grid_height, grid_width, self.num_anchor_sizes, 1)
-        class_pred = class_pred.view(batch_size, grid_height, grid_width, self.num_anchor_sizes, self.num_classes)
-        
-        # print('bbox_pred.shape', bbox_pred.shape)
-        # print('obj_pred.shape', obj_pred.shape)
-        # print('class_pred.shape', class_pred.shape)
-
-        # Optional decode stage
         if decode:
-            # Move anchors to the same device as input
             anchors = self.anchors.to(x.device)
-            
-            # Decode bounding box predictions
-            decoded_boxes = self.decode_boxes(bbox_pred, anchors)  # Shape: (batch_size, grid_height, grid_width, num_anchor_sizes, 4)
+            decoded_boxes = self.decode_boxes(bbox_pred, anchors)
             return decoded_boxes, obj_pred, class_pred
         else:
             return bbox_pred, obj_pred, class_pred
@@ -310,8 +374,13 @@ class SimpleObjectDetector(pl.LightningModule):
         num_anchor_sizes = anchors.size(2)
 
         for b in range(batch_size):
-            gt_boxes = targets_bbox[b].to(target_obj.device)
-            gt_labels = targets_cls[b].to(target_obj.device).long()
+            
+            # Because of 0 padding when batching, the irrelevant data has to be filtered out
+            valid_indices = (targets_bbox[b] != 0).all(dim=1)
+            
+            # Get valid bboxes and classes
+            gt_boxes = targets_bbox[b][valid_indices].to(target_obj.device)
+            gt_labels = targets_cls[b][valid_indices].to(target_obj.device).long()
             num_gt_boxes = gt_boxes.size(0)
 
             for idx in range(num_gt_boxes):
