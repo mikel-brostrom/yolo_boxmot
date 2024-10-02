@@ -53,7 +53,20 @@ def collate_fn(batch):
     target_cls = torch.stack(target_cls_list)
     boxes = torch.stack(boxes_list)
     obj_labels = torch.stack(obj_labels_list)
-
+    
+    
+    # Check that bounding box coordinates are between 0 and 1
+    if torch.any(boxes < 0) or torch.any(boxes > 1):
+        raise ValueError(f"Bounding box coordinates should be normalized between 0 and 1.")
+    
+    # Check that objectness are between 0 and 1
+    if torch.any(obj_labels < 0) or torch.any(obj_labels > 1):
+        raise ValueError(f"Objectness should be normalized between 0 and 1.")
+    
+    # Check that boxes have shape [num_boxes, 4]
+    if boxes.dim() != 3 or boxes.size(2) != 4:
+        raise ValueError(f"boxes should have shape [num_boxes, 4], but got {boxes.shape}.")
+    
     return images, target_cls, boxes, obj_labels
 
 
@@ -73,10 +86,12 @@ class YOLODataset(Dataset):
         self.num_classes = num_classes
         self.viz = visualize
         self.images = list(self.image_dir.glob("*.jpg"))  # List of image paths
+        self.transformed_size = 512  # Since Resize is set to (512, 512)
+
         
         # Define data augmentation and normalization transforms
         self.transforms = Compose([
-            Resize(512, 512),
+            Resize(self.transformed_size, self.transformed_size),
             HorizontalFlip(p=0.5),
             RandomBrightnessContrast(p=0.2),
             Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
@@ -145,10 +160,11 @@ class YOLODataset(Dataset):
             
         # Normalize bounding boxes
         if boxes.size(0) > 0:  # Ensure there are boxes to normalize
-            boxes[:, 0] /= original_width   # Normalize xmin
-            boxes[:, 1] /= original_height  # Normalize ymin
-            boxes[:, 2] /= original_width   # Normalize xmax
-            boxes[:, 3] /= original_height  # Normalize ymax
+            boxes[:, 0] /= self.transformed_size   # Normalize xmin
+            boxes[:, 1] /= self.transformed_size  # Normalize ymin
+            boxes[:, 2] /= self.transformed_size   # Normalize xmax
+            boxes[:, 3] /= self.transformed_size  # Normalize ymax
+            boxes = boxes.clamp(0, 1)
 
         # Create object labels (used as confidence scores in some models)
         obj_labels = torch.ones((len(labels),), dtype=torch.float32)
