@@ -8,8 +8,8 @@ import torchvision.transforms as T
 from pathlib import Path
 from simple_yolo.model import SimpleObjectDetector
 
-def load_model(checkpoint_path, num_boxes=1):
-    model = SimpleObjectDetector(num_boxes=num_boxes)
+def load_model(checkpoint_path):
+    model = SimpleObjectDetector()
     model.load_state_dict(torch.load(checkpoint_path)["state_dict"])
     model.eval()  # Set model to evaluation mode
     return model
@@ -45,8 +45,8 @@ def detect_objects(model, image_path, conf_threshold=0.5, obj_threshold=0.5, iou
     filtered_classes = class_indices[keep]
 
     # Scale boxes back to original image dimensions
-    filtered_boxes[:, [0, 2]] *= original_width
-    filtered_boxes[:, [1, 3]] *= original_height
+    filtered_boxes[:, [0, 2]] *= 512
+    filtered_boxes[:, [1, 3]] *= 512
 
     # Apply Non-Maximum Suppression (NMS)
     keep_indices = torchvision.ops.nms(filtered_boxes, filtered_scores, iou_threshold)
@@ -89,7 +89,7 @@ def visualize_predictions(image, boxes, scores, classes):
 
 def main():
     # Paths
-    checkpoint_path = "/Users/mikel.brostrom/yolo_boxmot/lightning_logs/version_155/checkpoints/yolo-epoch=19-avg_train_loss=0.00.ckpt"  # Path to the trained weights
+    checkpoint_path = "/Users/mikel.brostrom/yolo_boxmot/lightning_logs/version_82/checkpoints/yolo-epoch=02-avg_train_loss=0.00.ckpt"  # Path to the trained weights
     image_path = "coco128/coco128/images/train2017/000000000025.jpg"  # Example image from COCO128
 
     # Load the trained model
