@@ -34,17 +34,17 @@ def collate_fn(batch):
         images.append(img)
         
         # Pad target classes to max_boxes size
-        target_cls_padded = torch.zeros((max_boxes, target_cls.size(1)))  # (max_boxes, num_classes)
-        target_cls_padded[:len(target_cls), :] = target_cls
+        target_cls_padded = torch.full((max_boxes,), -1, dtype=torch.int64)  # (max_boxes,)
+        target_cls_padded[:len(target_cls)] = target_cls
         target_cls_list.append(target_cls_padded)
 
-        # Pad bounding boxes to max_boxes size
-        boxes_padded = torch.zeros((max_boxes, 4))  # (max_boxes, 4)
+        # Pad bounding boxes to max_boxes size with -1 to indicate invalid boxes
+        boxes_padded = torch.full((max_boxes, 4), -1, dtype=torch.float32)  # (max_boxes, 4)
         boxes_padded[:len(boxes), :] = boxes
         boxes_list.append(boxes_padded)
 
         # Pad object labels to max_boxes size
-        obj_labels_padded = torch.zeros((max_boxes,))  # (max_boxes,)
+        obj_labels_padded = torch.full((max_boxes,), -1, dtype=torch.float32)  # (max_boxes,)
         obj_labels_padded[:len(obj_labels)] = obj_labels
         obj_labels_list.append(obj_labels_padded)
 
@@ -53,6 +53,22 @@ def collate_fn(batch):
     target_cls = torch.stack(target_cls_list)
     boxes = torch.stack(boxes_list)
     obj_labels = torch.stack(obj_labels_list)
+    
+    # Check that bounding box coordinates are between 0 and 1, ignoring padded (-1) values
+    if torch.any((boxes != -1) & ((boxes < 0) | (boxes > 1))):
+        raise ValueError(f"Bounding box coordinates should be normalized between 0 and 1, or -1 for padding.")
+    
+    # Check that objectness is between 0 and 1, ignoring padded (-1) values
+    if torch.any((obj_labels != -1) & ((obj_labels < 0) | (obj_labels > 1))):
+        raise ValueError(f"Objectness should be normalized between 0 and 1, or -1 for padding.")
+    
+    # Check that target_cls contains valid class indices or padding values (-1)
+    if not torch.all((target_cls == -1) | ((target_cls >= 0) & (target_cls < 80))):
+        raise ValueError(f"Class indices should be between 0 and {80 - 1}, or -1 for padding.")
+    
+    # Check that boxes have shape [batch_size, max_boxes, 4]
+    if boxes.dim() != 3 or boxes.size(2) != 4:
+        raise ValueError(f"boxes should have shape [batch_size, max_boxes, 4], but got {boxes.shape}.")
 
     return images, target_cls, boxes, obj_labels
 
@@ -73,10 +89,12 @@ class YOLODataset(Dataset):
         self.num_classes = num_classes
         self.viz = visualize
         self.images = list(self.image_dir.glob("*.jpg"))  # List of image paths
+        self.transformed_size = 512  # Since Resize is set to (512, 512)
+
         
         # Define data augmentation and normalization transforms
         self.transforms = Compose([
-            Resize(512, 512),
+            Resize(self.transformed_size, self.transformed_size),
             HorizontalFlip(p=0.5),
             RandomBrightnessContrast(p=0.2),
             Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
@@ -145,18 +163,17 @@ class YOLODataset(Dataset):
             
         # Normalize bounding boxes
         if boxes.size(0) > 0:  # Ensure there are boxes to normalize
-            boxes[:, 0] /= original_width   # Normalize xmin
-            boxes[:, 1] /= original_height  # Normalize ymin
-            boxes[:, 2] /= original_width   # Normalize xmax
-            boxes[:, 3] /= original_height  # Normalize ymax
+            boxes[:, 0] /= self.transformed_size   # Normalize xmin
+            boxes[:, 1] /= self.transformed_size  # Normalize ymin
+            boxes[:, 2] /= self.transformed_size   # Normalize xmax
+            boxes[:, 3] /= self.transformed_size  # Normalize ymax
+            boxes = boxes.clamp(0, 1)
 
         # Create object labels (used as confidence scores in some models)
         obj_labels = torch.ones((len(labels),), dtype=torch.float32)
         
-        # Convert labels to one-hot encoding for multi-class classification
-        target_cls = torch.zeros(len(labels), self.num_classes)
-        if len(labels) > 0:
-            target_cls[torch.arange(len(labels)), labels] = 1
+        # Return target class labels directly for single-class detection
+        target_cls = labels
 
         return img, target_cls, boxes, obj_labels
     
