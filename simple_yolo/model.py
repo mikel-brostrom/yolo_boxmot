@@ -65,7 +65,7 @@ class SimpleObjectDetector(pl.LightningModule):
         input_size (int): Input image size.
     """
     
-    def __init__(self, resnet_version='resnet18', num_boxes=1, num_classes=80, learning_rate=1e-3, input_size=512):
+    def __init__(self, resnet_version='resnet50', num_boxes=1, num_classes=80, learning_rate=1e-5, input_size=512):
         super(SimpleObjectDetector, self).__init__()
         self.num_boxes = num_boxes
         self.num_classes = num_classes
@@ -73,8 +73,8 @@ class SimpleObjectDetector(pl.LightningModule):
         self.input_size = input_size
         
         # Define widths and heights for anchors
-        self.widths = torch.tensor([0.2, 0.3, 0.4], dtype=torch.float32, device='mps')
-        self.heights = torch.tensor([0.2, 0.3, 0.4], dtype=torch.float32, device='mps')
+        self.widths = torch.tensor([0.1, 0.2, 0.4], dtype=torch.float32, device='mps')
+        self.heights = torch.tensor([0.1, 0.2, 0.4], dtype=torch.float32, device='mps')
 
         # Compute the number of anchor sizes
         self.num_anchor_sizes = len(self.widths) * len(self.heights)
@@ -192,10 +192,6 @@ class SimpleObjectDetector(pl.LightningModule):
             for m in head:
                 if isinstance(m, nn.Conv2d):
                     nn.init.normal_(m.weight, mean=0.0, std=0.01)
-                    if head is self.objectness_head:
-                        nn.init.constant_(m.bias, -4.0)  # Example negative bias
-                    else:
-                        nn.init.constant_(m.bias, 0)
 
     def _compute_feature_map_size(self, input_size):
         """
@@ -212,6 +208,32 @@ class SimpleObjectDetector(pl.LightningModule):
             dummy_features = self.backbone(dummy_input)
         grid_height, grid_width = dummy_features.shape[2], dummy_features.shape[3]
         return grid_height, grid_width
+    
+    def decode_bbox_predictions(self, bbox_pred, anchors):
+        """
+        Decode bbox predictions using anchor boxes.
+
+        Args:
+            bbox_pred (Tensor): Predicted bbox offsets.
+            anchors (Tensor): Anchor boxes.
+
+        Returns:
+            Tensor: Decoded bbox predictions in (x1, y1, x2, y2) format.
+        """
+        pred_bbox = torch.zeros_like(bbox_pred, device=bbox_pred.device)
+        pred_bbox[..., 0] = bbox_pred[..., 0] * anchors[..., 2] + anchors[..., 0]  # x_center
+        pred_bbox[..., 1] = bbox_pred[..., 1] * anchors[..., 3] + anchors[..., 1]  # y_center
+        pred_bbox[..., 2] = torch.exp(bbox_pred[..., 2]) * anchors[..., 2]  # width
+        pred_bbox[..., 3] = torch.exp(bbox_pred[..., 3]) * anchors[..., 3]  # height
+
+        # Convert center coordinates to corner coordinates
+        pred_bbox_corners = torch.zeros_like(pred_bbox)
+        pred_bbox_corners[..., 0] = pred_bbox[..., 0] - pred_bbox[..., 2] / 2  # x_min
+        pred_bbox_corners[..., 1] = pred_bbox[..., 1] - pred_bbox[..., 3] / 2  # y_min
+        pred_bbox_corners[..., 2] = pred_bbox[..., 0] + pred_bbox[..., 2] / 2  # x_max
+        pred_bbox_corners[..., 3] = pred_bbox[..., 1] + pred_bbox[..., 3] / 2  # y_max
+
+        return pred_bbox_corners
 
     def forward(self, x, decode=False):
         """
@@ -248,7 +270,16 @@ class SimpleObjectDetector(pl.LightningModule):
         class_pred = class_pred.view(batch_size, self.num_anchor_sizes, self.num_classes, grid_height, grid_width)
         class_pred = class_pred.permute(0, 3, 4, 1, 2).contiguous()
 
-        return bbox_pred, obj_pred, class_pred
+        if decode:
+            # Ensure anchors are on the same device as the input
+            anchors = self.anchors.to(x.device)
+
+            # Decode the bounding box predictions
+            decoded_boxes = self.decode_bbox_predictions(bbox_pred, anchors)
+
+            return decoded_boxes, obj_pred, class_pred
+        else:
+            return bbox_pred, obj_pred, class_pred
     
     
     def decode_bbox_predictions(self, bbox_pred, anchors):
@@ -295,8 +326,7 @@ class SimpleObjectDetector(pl.LightningModule):
 
         # Combine centers and sizes to get anchors
         anchors = torch.cat([anchor_centers, anchor_sizes], dim=-1)  # Shape: (grid_height, grid_width, num_anchor_sizes, 4)
-        # print(anchors[0][0])
-        # print(anchors[15][15])
+
         return anchors
 
 
@@ -330,6 +360,11 @@ class SimpleObjectDetector(pl.LightningModule):
         for b in range(batch_size):
             gt_boxes = targets_bbox[b]  # Ground truth boxes for image b, shape (num_gt_boxes, 4)
             gt_classes = targets_cls[b]  # Ground truth classes for image b, shape (num_gt_boxes,)
+                        
+            # **Filter out padded entries**
+            valid_mask = gt_boxes[:, 0] != -1  # Get rid of padded (-1) rows due to batching
+            gt_boxes = gt_boxes[valid_mask]
+            gt_classes = gt_classes[valid_mask]
             
             num_gt_boxes = gt_boxes.shape[0]
             if num_gt_boxes == 0:
@@ -345,9 +380,9 @@ class SimpleObjectDetector(pl.LightningModule):
 
             # Compute IoU between gt_boxes and anchors
             ious = compute_iou(gt_boxes, anchors_corners).squeeze(0)  # (num_gt_boxes, num_anchors)
-            
+
             # Assign multiple anchors to each ground truth if IoU exceeds threshold
-            iou_threshold = 0.5
+            iou_threshold = 0.4
             for gt_idx in range(num_gt_boxes):
                 high_iou_indices = torch.where(ious[gt_idx] > iou_threshold)[0]
                 for anchor_flat_idx in high_iou_indices:
@@ -382,8 +417,13 @@ class SimpleObjectDetector(pl.LightningModule):
 
                     t_x = (gt_cx - anchor_cx) / (anchor_w + 1e-6)
                     t_y = (gt_cy - anchor_cy) / (anchor_h + 1e-6)
-                    t_w = torch.log(gt_w / (anchor_w + 1e-6))
-                    t_h = torch.log(gt_h / (anchor_h + 1e-6))
+                    
+                    ratio_w = gt_w / (anchor_w + 1e-6)
+                    ratio_h = gt_h / (anchor_h + 1e-6)
+                    ratio_w = torch.clamp(ratio_w, min=1e-4, max=1e4)
+                    ratio_h = torch.clamp(ratio_h, min=1e-4, max=1e4)
+                    t_w = torch.log(ratio_w)
+                    t_h = torch.log(ratio_h)
                     
                     target_bbox[b, grid_y, grid_x, anchor_size_idx, :] = torch.tensor([t_x, t_y, t_w, t_h], device=device)
                     
@@ -409,7 +449,7 @@ class SimpleObjectDetector(pl.LightningModule):
         if mask.sum() > 0:
             pred_bbox_pos = pred_bbox[mask]
             target_bbox_pos = target_bbox[mask]
-            bbox_loss = F.smooth_l1_loss(pred_bbox_pos, target_bbox_pos).mean()  # Using CIoU loss for better localization
+            bbox_loss = F.smooth_l1_loss(pred_bbox_pos, target_bbox_pos, reduction='mean')
         else:
             bbox_loss = torch.tensor(0.0, device=device, requires_grad=True)
 
@@ -417,12 +457,12 @@ class SimpleObjectDetector(pl.LightningModule):
         if mask.sum() > 0:
             pred_class_pos = pred_class[mask]
             target_class_pos = target_class[mask]
-            class_loss = F.cross_entropy(pred_class_pos, target_class_pos, reduction='sum') / batch_size
+            class_loss = F.cross_entropy(pred_class_pos, target_class_pos, reduction='mean')
         else:
             class_loss = torch.tensor(0.0, device=device, requires_grad=True)
 
         # Total loss
-        total_loss = 2 * bbox_loss + obj_loss + class_loss
+        total_loss = 5 * bbox_loss + obj_loss + class_loss
 
         # Log losses
         self.log('total_loss', total_loss, on_step=True, on_epoch=True, prog_bar=True)
