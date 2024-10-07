@@ -10,10 +10,96 @@ from torch.utils.data import DataLoader, Dataset
 from torchvision.transforms import functional as F
 import pytorch_lightning as pl
 from albumentations import (
-    Compose, Resize, HorizontalFlip, RandomBrightnessContrast, Normalize
+    Compose, Resize, HorizontalFlip, RandomBrightnessContrast, Normalize, BboxParams
 )
 from albumentations.pytorch import ToTensorV2
 import argparse
+
+
+# COCO class names
+COCO_CLASSES = {
+    0: 'person',
+    1: 'bicycle',
+    2: 'car',
+    3: 'motorcycle',
+    4: 'airplane',
+    5: 'bus',
+    6: 'train',
+    7: 'truck',
+    8: 'boat',
+    9: 'traffic light',
+    10: 'fire hydrant',
+    11: 'stop sign',
+    12: 'parking meter',
+    13: 'bench',
+    14: 'bird',
+    15: 'cat',
+    16: 'dog',
+    17: 'horse',
+    18: 'sheep',
+    19: 'cow',
+    20: 'elephant',
+    21: 'bear',
+    22: 'zebra',
+    23: 'giraffe',
+    24: 'backpack',
+    25: 'umbrella',
+    26: 'handbag',
+    27: 'tie',
+    28: 'suitcase',
+    29: 'frisbee',
+    30: 'skis',
+    31: 'snowboard',
+    32: 'sports ball',
+    33: 'kite',
+    34: 'baseball bat',
+    35: 'baseball glove',
+    36: 'skateboard',
+    37: 'surfboard',
+    38: 'tennis racket',
+    39: 'bottle',
+    40: 'wine glass',
+    41: 'cup',
+    42: 'fork',
+    43: 'knife',
+    44: 'spoon',
+    45: 'bowl',
+    46: 'banana',
+    47: 'apple',
+    48: 'sandwich',
+    49: 'orange',
+    50: 'broccoli',
+    51: 'carrot',
+    52: 'hot dog',
+    53: 'pizza',
+    54: 'donut',
+    55: 'cake',
+    56: 'chair',
+    57: 'couch',
+    58: 'potted plant',
+    59: 'bed',
+    60: 'dining table',
+    61: 'toilet',
+    62: 'TV',
+    63: 'laptop',
+    64: 'mouse',
+    65: 'remote',
+    66: 'keyboard',
+    67: 'cell phone',
+    68: 'microwave',
+    69: 'oven',
+    70: 'toaster',
+    71: 'sink',
+    72: 'refrigerator',
+    73: 'book',
+    74: 'clock',
+    75: 'vase',
+    76: 'scissors',
+    77: 'teddy bear',
+    78: 'hair drier',
+    79: 'toothbrush'
+}
+
 
 
 def collate_fn(batch):
@@ -99,7 +185,7 @@ class YOLODataset(Dataset):
             RandomBrightnessContrast(p=0.2),
             Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
             ToTensorV2()
-        ], bbox_params={'format': 'pascal_voc', 'label_fields': ['category_ids']})  # Pascal VOC format: [x_min, y_min, x_max, y_max]
+        ], bbox_params=BboxParams(format='pascal_voc', label_fields=['category_ids']))  # Pascal VOC format: [x_min, y_min, x_max, y_max]
 
     def __len__(self):
         """Returns the total number of samples."""
@@ -159,7 +245,7 @@ class YOLODataset(Dataset):
             
         # Visualize the image with bounding boxes (for debugging/verification)
         if self.viz:
-            self.visualize(img, boxes)
+            self.visualize(img, boxes, labels)
             
         # Normalize bounding boxes
         if boxes.size(0) > 0:  # Ensure there are boxes to normalize
@@ -177,7 +263,7 @@ class YOLODataset(Dataset):
 
         return img, target_cls, boxes, obj_labels
     
-    def visualize(self, img, boxes):
+    def visualize(self, img, boxes, labels):
         """
         Visualize the image and its bounding boxes using OpenCV.
         
@@ -198,15 +284,26 @@ class YOLODataset(Dataset):
         # Convert from RGB to BGR for OpenCV
         img_np = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
         
-        # Draw bounding boxes
-        for box in boxes:
+        # Draw bounding boxes and labels
+        for box, label in zip(boxes, labels):
             xmin, ymin, xmax, ymax = map(int, box.tolist())
             img_np = cv2.rectangle(img_np, (xmin, ymin), (xmax, ymax), (0, 255, 0), 2)  # Green color
+            
+            # Add label text above the bounding box
+            font = cv2.FONT_HERSHEY_SIMPLEX
+            font_scale = 0.5
+            thickness = 1
+            text_size, _ = cv2.getTextSize(str(COCO_CLASSES[int(label) + 1]), font, font_scale, thickness)
+            text_x, text_y = xmin, ymin - 5
+            # Draw a filled rectangle behind the text to improve visibility
+            cv2.rectangle(img_np, (text_x, text_y - text_size[1]), (text_x + text_size[0], text_y), (0, 255, 0), cv2.FILLED)
+            # Put the label text on the image
+            img_np = cv2.putText(img_np, str(COCO_CLASSES[int(label) + 1]), (text_x, text_y), font, font_scale, (0, 0, 0), thickness)
 
-        # Display the image using OpenCV
-        cv2.imshow('Image with Bounding Boxes', img_np)
-        cv2.waitKey(0)  # Wait for a key press to continue
-        cv2.destroyAllWindows()  # Close the window
+            # Display the image using OpenCV
+            cv2.imshow('Image with Bounding Boxes', img_np)
+            cv2.waitKey(0)  # Wait for a key press to continue
+            cv2.destroyAllWindows()  # Close the window
 
 
 def main():
