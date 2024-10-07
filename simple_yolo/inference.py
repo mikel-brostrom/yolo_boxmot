@@ -6,15 +6,29 @@ from PIL import Image
 import matplotlib.pyplot as plt
 import torchvision.transforms as T
 from pathlib import Path
-from simple_yolo.model import SimpleObjectDetector
+from simple_yolo.models.single_scale import SingleScaleModel
+from simple_yolo.models.multi_scale import MultiScaleModel
+from simple_yolo.models.multi_scale_fpn import MultiScaleFPN
 
 def load_model(checkpoint_path):
-    model = SimpleObjectDetector()
-    model.load_state_dict(torch.load(checkpoint_path)["state_dict"])
+    checkpoint = torch.load(checkpoint_path)
+    model_type = checkpoint['hyper_parameters']['model_type']
+
+    # Instantiate the correct model based on the saved model type
+    if model_type == "SingleScaleModel":
+        model = SingleScaleModel()  # Instantiate with necessary arguments if any
+    elif model_type == "MultiScaleModel":
+        model = MultiScaleModel()
+    elif model_type == "MultiScaleFPN":
+        model = MultiScaleFPN()
+    else:
+        raise ValueError(f"Unknown model type: {model_type}")
+
+    model.load_state_dict(checkpoint["state_dict"])
     model.eval()  # Set model to evaluation mode
     return model
 
-def detect_objects(model, image_path, conf_threshold=0.5, obj_threshold=0.5, iou_threshold=0.99):
+def detect_objects(model, image_path, obj_threshold=0.04, iou_threshold=0.2):
     # Load image
     img = Image.open(image_path).convert("RGB")
     original_width, original_height = img.size  # Save original image dimensions
@@ -29,20 +43,18 @@ def detect_objects(model, image_path, conf_threshold=0.5, obj_threshold=0.5, iou
     with torch.no_grad():
         bbox_pred, obj_pred, class_pred = model(input_tensor, decode=True)  # Model returns bbox, objectness, and class predictions
 
+    print(obj_pred)
+
     # Reshape predictions for processing
     bbox_pred = bbox_pred.view(-1, 4)  # Shape: (num_predictions, 4)
-    class_pred = class_pred.view(-1, model.num_classes)  # Shape: (num_predictions, num_classes)
+    class_pred = class_pred.view(-1)  # Shape: (num_predictions, num_classes)
     obj_pred = obj_pred.view(-1)  # Shape: (num_predictions,)
 
-    # Combine objectness score with class confidence
-    conf_scores, class_indices = torch.max(class_pred, dim=1)  # Get max class confidence and indices
-    combined_scores = obj_pred * conf_scores  # Combine class confidence with objectness score
-
     # Apply a confidence threshold and objectness threshold
-    keep = (combined_scores > conf_threshold) & (obj_pred > obj_threshold)  # Filter based on both objectness and confidence
+    keep = (obj_pred > obj_threshold)  # Filter based on objectness
     filtered_boxes = bbox_pred[keep]
-    filtered_scores = combined_scores[keep]
-    filtered_classes = class_indices[keep]
+    filtered_scores = obj_pred[keep]
+    filtered_classes = class_pred[keep]
 
     # Scale boxes back to original image dimensions
     filtered_boxes[:, [0, 2]] *= 512
@@ -89,7 +101,7 @@ def visualize_predictions(image, boxes, scores, classes):
 
 def main():
     # Paths
-    checkpoint_path = "/Users/mikel.brostrom/yolo_boxmot/lightning_logs/version_82/checkpoints/yolo-epoch=02-avg_train_loss=0.00.ckpt"  # Path to the trained weights
+    checkpoint_path = "/Users/mikel.brostrom/yolo_boxmot/lightning_logs/version_211/checkpoints/yolo-epoch=04-avg_train_loss=0.00.ckpt"  # Path to the trained weights
     image_path = "coco128/coco128/images/train2017/000000000025.jpg"  # Example image from COCO128
 
     # Load the trained model
