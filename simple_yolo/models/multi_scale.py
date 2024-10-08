@@ -6,13 +6,13 @@ import torchvision
 import math
 
 class MultiScaleModel(pl.LightningModule):
-    def __init__(self, num_classes=80, learning_rate=1e-3):
+    def __init__(self, backbone='resnet50', num_classes=80, learning_rate=1e-3):
         super().__init__()
         
         self.save_hyperparameters(
             {
                 'model_type': self.__class__.__name__,
-                'backbone': backbone
+                'backbone': 'resnet50'
             }
         )
 
