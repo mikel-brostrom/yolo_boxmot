@@ -25,9 +25,8 @@ from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 
 
 def main():
-    download_coco128()  # Ensure the dataset is downloaded and extracted
-    image_dir = 'coco128/coco128/images/train2017'
-    label_dir = 'coco128/coco128/labels/train2017'
+    image_dir = 'coco128/images/train2017'
+    label_dir = 'coco128/labels/train2017'
 
     model = SingleScaleModel(num_classes=80)
     dataset = YOLODataset(image_dir, label_dir)
