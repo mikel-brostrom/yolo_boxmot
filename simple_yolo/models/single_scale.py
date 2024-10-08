@@ -3,19 +3,36 @@ import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
 import torchvision
+from torchvision.models import ResNet18_Weights, ResNet34_Weights, ResNet50_Weights
 import math
 
+
 class SingleScaleModel(pl.LightningModule):
-    def __init__(self, num_classes=80, learning_rate=1e-3):
+    def __init__(self, backbone='resnet18', num_classes=80, learning_rate=1e-3):
         super().__init__()
-        self.save_hyperparameters({'model_type': self.__class__.__name__})  # Saves all arguments passed to the constructor as hyperparameters
+        self.save_hyperparameters(
+            {
+                'model_type': self.__class__.__name__,
+                'backbone': backbone
+            }
+        )
 
         self.num_classes = num_classes
         self.learning_rate = learning_rate
-        self.model_type = "SingleScaleModel"
 
-        # Load resnet50 backbone and remove the fully connected layer
-        resnet = torchvision.models.resnet18(pretrained=True)
+        # Load the appropriate ResNet backbone based on the input parameter
+        if backbone == 'resnet18':
+            resnet = torchvision.models.resnet18(weights=ResNet18_Weights.DEFAULT)
+            in_channels = 512  # Final feature map has 512 channels for ResNet18
+        elif backbone == 'resnet34':
+            resnet = torchvision.models.resnet34(weights=ResNet34_Weights.DEFAULT)
+            in_channels = 512  # Final feature map has 512 channels for ResNet34
+        elif backbone == 'resnet50':
+            resnet = torchvision.models.resnet50(weights=ResNet50_Weights.DEFAULT)
+            in_channels = 2048  # Final feature map has 2048 channels for ResNet50
+        else:
+            raise ValueError(f"Unsupported backbone type: {backbone_type}")
+        
         self.backbone = nn.Sequential(*list(resnet.children())[:-2])  # Output: [batch_size, 2048, H', W']
 
         # Define anchors (3 scales)
@@ -28,74 +45,71 @@ class SingleScaleModel(pl.LightningModule):
         self.num_anchors = self.anchors.size(0)
 
         # Detection head: predicts bounding boxes, objectness score, and class probabilities
-        self.detection_head = nn.Conv2d(in_channels=512, out_channels=self.num_anchors * (5 + num_classes), kernel_size=1)
+        self.detection_head = nn.Conv2d(in_channels=in_channels, out_channels=self.num_anchors * (5 + num_classes), kernel_size=1)
         # Output channels: (4 bbox coordinates + 1 objectness score + num_classes class scores) * num_anchors
-        
-        
-    def decode_predictions(self, predictions):
-        """
-        Decode predictions to bounding boxes, objectness scores, and class scores.
-        Args:
-            predictions: Tensor of shape [batch_size, num_predictions, 5 + num_classes]
-        Returns:
-            decoded_boxes: Bounding boxes in original image coordinates
-            decoded_scores: Objectness scores
-            decoded_labels: Class labels
-        """
+
+    def decode_predictions(self, predictions, conf_threshold=0.5, nms_threshold=0.5):
         batch_size, num_predictions, _ = predictions.shape
+        num_anchors = self.num_anchors
+        num_classes = self.num_classes
+        H_W = int(math.sqrt(num_predictions // num_anchors))
+        H, W = H_W, H_W
+
         device = predictions.device
+        predictions = predictions.view(batch_size, H, W, num_anchors, 5 + num_classes)
 
-        H = W = int(math.sqrt(num_predictions / self.num_anchors))
+        # Get x_offset, y_offset, w_offset, h_offset, objectness, class_scores
+        x_offset = torch.sigmoid(predictions[..., 0])
+        y_offset = torch.sigmoid(predictions[..., 1])
+        w_offset = predictions[..., 2]
+        h_offset = predictions[..., 3]
+        objectness = torch.sigmoid(predictions[..., 4])
 
-        # Extract components
-        pred_bbox = predictions[:, :, :4]
-        pred_objectness = torch.sigmoid(predictions[:, :, 4])
-        pred_class_scores = F.softmax(predictions[:, :, 5:], dim=-1)
+        # Apply softmax to class scores
+        class_scores = F.softmax(predictions[..., 5:], dim=-1)
 
-        decoded_boxes = []
-        for b in range(batch_size):
-            boxes = []
-            for n in range(num_predictions):
-                # Get anchor box
-                anchor_idx = n % self.num_anchors
-                anchor = self.anchors[anchor_idx].to(device)
+        # Compute x_center, y_center
+        grid_x = torch.arange(W, device=device).view(1, 1, W, 1).repeat(1, H, 1, num_anchors)
+        grid_y = torch.arange(H, device=device).view(1, H, 1, 1).repeat(1, 1, W, num_anchors)
 
-                # Get grid location
-                grid_x = (n // self.num_anchors) % W
-                grid_y = (n // self.num_anchors) // W
+        x_center = (grid_x + x_offset) / W
+        y_center = (grid_y + y_offset) / H
 
-                # Extract offsets and sizes
-                x_offset, y_offset, w_offset, h_offset = pred_bbox[b, n]
+        # Compute width and height
+        anchors = self.anchors.to(device)  # [num_anchors, 2]
+        anchor_w = anchors[:, 0].view(1, 1, 1, num_anchors)
+        anchor_h = anchors[:, 1].view(1, 1, 1, num_anchors)
 
-                # Decode center
-                x_offset = torch.sigmoid(x_offset)
-                y_offset = torch.sigmoid(y_offset)
-                center_x = (grid_x + x_offset) / W
-                center_y = (grid_y + y_offset) / H
+        width = anchor_w * torch.exp(w_offset)
+        height = anchor_h * torch.exp(h_offset)
 
-                # Decode width and height
-                width = anchor[0] * torch.exp(w_offset)
-                height = anchor[1] * torch.exp(h_offset)
+        # Convert to x1, y1, x2, y2
+        x1 = x_center - width / 2
+        y1 = y_center - height / 2
+        x2 = x_center + width / 2
+        y2 = y_center + height / 2
 
-                # Convert to (x1, y1, x2, y2)
-                x1 = center_x - width / 2
-                y1 = center_y - height / 2
-                x2 = center_x + width / 2
-                y2 = center_y + height / 2
+        boxes = torch.stack([x1, y1, x2, y2], dim=-1)  # Shape: [batch_size, H, W, num_anchors, 4]
+        
+        # Clamp the values between 0 and 1
+        boxes = torch.clamp(boxes, min=0.0, max=1.0)
 
-                # Append box
-                boxes.append([x1, y1, x2, y2])
+        # Reshape to [batch_size, num_predictions, ...]
+        boxes = boxes.view(batch_size, -1, 4)
+        objectness = objectness.view(batch_size, -1)
+        class_scores = class_scores.view(batch_size, -1, num_classes)
 
-            decoded_boxes.append(torch.tensor(boxes, device=device))
+        # Multiply objectness with class scores
+        scores = objectness.unsqueeze(-1) * class_scores  # [batch_size, num_predictions, num_classes]
 
-        # Stack the boxes for the whole batch
-        decoded_boxes = torch.stack(decoded_boxes)
+        # For each prediction, get the max class score and corresponding label
+        scores_max, labels = torch.max(scores, dim=-1)  # [batch_size, num_predictions]
 
-        # Get objectness and class labels
-        decoded_scores = pred_objectness
-        decoded_labels = torch.argmax(pred_class_scores, dim=-1)
+        # Filter out predictions with low confidence
+        conf_mask = scores_max > conf_threshold
 
-        return decoded_boxes, decoded_scores, decoded_labels
+        return boxes, scores_max, labels
+
 
 
     def forward(self, x, decode=False):
@@ -142,6 +156,12 @@ class SingleScaleModel(pl.LightningModule):
             for t in range(valid_target_cls.size(0)):
                 cls = valid_target_cls[t].long()
                 box = valid_boxes[t, :]
+                
+                # Clamp the box coordinates to be within the image bounds
+                box[0] = torch.clamp(box[0], min=0, max=1)
+                box[1] = torch.clamp(box[1], min=0, max=1)
+                box[2] = torch.clamp(box[2], min=0, max=1)
+                box[3] = torch.clamp(box[3], min=0, max=1)
 
                 x_center = (box[0] + box[2]) / 2
                 y_center = (box[1] + box[3]) / 2
@@ -168,11 +188,22 @@ class SingleScaleModel(pl.LightningModule):
                 x_offset = torch.clamp(x_offset, min=0, max=1)
                 y_offset = torch.clamp(y_offset, min=0, max=1)
 
+                # Get the corresponding anchor for this prediction
+                anchor = self.anchors[anchor_idx].to(device)
+
+                # Compute width and height ratios
+                width_ratio = width / (anchor[0] + epsilon)
+                height_ratio = height / (anchor[1] + epsilon)
+
+                # Compute w_offset and h_offset
+                w_offset = torch.log(width_ratio + epsilon)
+                h_offset = torch.log(height_ratio + epsilon)
+
                 target_objectness[b, index] = 1
                 target_bbox[b, index, 0] = x_offset
                 target_bbox[b, index, 1] = y_offset
-                target_bbox[b, index, 2] = width * H_W
-                target_bbox[b, index, 3] = height * H_W
+                target_bbox[b, index, 2] = w_offset
+                target_bbox[b, index, 3] = h_offset
                 target_class[b, index] = cls
 
         # Clamp target_objectness to ensure values are in [0, 1]
@@ -182,7 +213,11 @@ class SingleScaleModel(pl.LightningModule):
         pred_objectness = pred_objectness.reshape(-1)
         target_objectness = target_objectness.reshape(-1)
 
-        objectness_loss = F.binary_cross_entropy_with_logits(pred_objectness, target_objectness, reduction='mean')
+        alpha, gamma = 0.25, 2
+        BCE_loss = F.binary_cross_entropy_with_logits(pred_objectness, target_objectness, reduction='none')
+        pt = torch.exp(-BCE_loss)  # Prevents nans when probability 0
+        F_loss = alpha * (1 - pt) ** gamma * BCE_loss
+        objectness_loss = F_loss.mean()
 
         # Bounding box loss
         obj_mask = target_objectness == 1
@@ -190,7 +225,7 @@ class SingleScaleModel(pl.LightningModule):
             pred_bbox = pred_bbox.reshape(-1, 4)
             target_bbox = target_bbox.reshape(-1, 4)
 
-            bbox_loss = F.mse_loss(pred_bbox[obj_mask], target_bbox[obj_mask], reduction='mean')
+            bbox_loss = F.smooth_l1_loss(pred_bbox[obj_mask], target_bbox[obj_mask], reduction='mean')
 
             # Class loss with ignore_index
             pred_class_scores = pred_class_scores.reshape(-1, self.num_classes)
@@ -209,6 +244,7 @@ class SingleScaleModel(pl.LightningModule):
         self.log('class_loss', class_loss.detach(), on_step=True, on_epoch=True)
 
         return train_loss
+
 
     def get_best_anchor(self, width, height):
         anchors = self.anchors.to(width.device)

@@ -13,14 +13,15 @@ from simple_yolo.models.multi_scale_fpn import MultiScaleFPN
 def load_model(checkpoint_path):
     checkpoint = torch.load(checkpoint_path)
     model_type = checkpoint['hyper_parameters']['model_type']
+    backbone = checkpoint['hyper_parameters']['backbone']
 
     # Instantiate the correct model based on the saved model type
     if model_type == "SingleScaleModel":
-        model = SingleScaleModel()  # Instantiate with necessary arguments if any
+        model = SingleScaleModel(backbone=backbone)  # Instantiate with necessary arguments if any
     elif model_type == "MultiScaleModel":
-        model = MultiScaleModel()
+        model = MultiScaleModel(backbone=backbone)
     elif model_type == "MultiScaleFPN":
-        model = MultiScaleFPN()
+        model = MultiScaleFPN(backbone=backbone)
     else:
         raise ValueError(f"Unknown model type: {model_type}")
 
@@ -28,7 +29,7 @@ def load_model(checkpoint_path):
     model.eval()  # Set model to evaluation mode
     return model
 
-def detect_objects(model, image_path, obj_threshold=0.04, iou_threshold=0.2):
+def detect_objects(model, image_path, obj_threshold=0.1, iou_threshold=0.5):
     # Load image
     img = Image.open(image_path).convert("RGB")
     original_width, original_height = img.size  # Save original image dimensions
@@ -42,8 +43,6 @@ def detect_objects(model, image_path, obj_threshold=0.04, iou_threshold=0.2):
     # Perform inference
     with torch.no_grad():
         bbox_pred, obj_pred, class_pred = model(input_tensor, decode=True)  # Model returns bbox, objectness, and class predictions
-
-    print(obj_pred)
 
     # Reshape predictions for processing
     bbox_pred = bbox_pred.view(-1, 4)  # Shape: (num_predictions, 4)
@@ -101,7 +100,7 @@ def visualize_predictions(image, boxes, scores, classes):
 
 def main():
     # Paths
-    checkpoint_path = "/Users/mikel.brostrom/yolo_boxmot/lightning_logs/version_211/checkpoints/yolo-epoch=04-avg_train_loss=0.00.ckpt"  # Path to the trained weights
+    checkpoint_path = "/Users/mikel.brostrom/yolo_boxmot/lightning_logs/version_0/checkpoints/yolo-epoch=00-avg_train_loss=0.00.ckpt"  # Path to the trained weights
     image_path = "coco128/coco128/images/train2017/000000000025.jpg"  # Example image from COCO128
 
     # Load the trained model
