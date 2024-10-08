@@ -8,7 +8,13 @@ import math
 class MultiScaleFPN(pl.LightningModule):
     def __init__(self, num_classes=80, learning_rate=1e-3):
         super().__init__()
-        self.save_hyperparameters({'model_type': self.__class__.__name__})
+        
+        self.save_hyperparameters(
+            {
+                'model_type': self.__class__.__name__,
+                'backbone': backbone
+            }
+        )
 
         self.num_classes = num_classes
         self.learning_rate = learning_rate
