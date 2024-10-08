@@ -48,7 +48,7 @@ class SingleScaleModel(pl.LightningModule):
         self.detection_head = nn.Conv2d(in_channels=in_channels, out_channels=self.num_anchors * (5 + num_classes), kernel_size=1)
         # Output channels: (4 bbox coordinates + 1 objectness score + num_classes class scores) * num_anchors
 
-    def decode_predictions(self, predictions, conf_threshold=0.5, nms_threshold=0.5):
+    def decode_predictions(self, predictions):
         batch_size, num_predictions, _ = predictions.shape
         num_anchors = self.num_anchors
         num_classes = self.num_classes
@@ -104,9 +104,6 @@ class SingleScaleModel(pl.LightningModule):
 
         # For each prediction, get the max class score and corresponding label
         scores_max, labels = torch.max(scores, dim=-1)  # [batch_size, num_predictions]
-
-        # Filter out predictions with low confidence
-        conf_mask = scores_max > conf_threshold
 
         return boxes, scores_max, labels
 
