@@ -44,9 +44,16 @@ class SingleScaleModel(pl.LightningModule):
 
         self.num_anchors = self.anchors.size(0)
 
-        # Detection head: predicts bounding boxes, objectness score, and class probabilities
-        self.detection_head = nn.Conv2d(in_channels=in_channels, out_channels=self.num_anchors * (5 + num_classes), kernel_size=1)
-        # Output channels: (4 bbox coordinates + 1 objectness score + num_classes class scores) * num_anchors
+        # Enhanced Detection head: multiple convolutional layers with BatchNorm and ReLU
+        self.detection_head = nn.Sequential(
+            nn.Conv2d(in_channels=in_channels, out_channels=1024, kernel_size=3, padding=1),
+            nn.BatchNorm2d(1024),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels=1024, out_channels=512, kernel_size=3, padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels=512, out_channels=self.num_anchors * (5 + num_classes), kernel_size=1)
+        )
 
     def decode_predictions(self, predictions):
         batch_size, num_predictions, _ = predictions.shape
